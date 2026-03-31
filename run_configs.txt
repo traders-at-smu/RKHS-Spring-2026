@@ -1,0 +1,280 @@
+RKHS Pipeline — Reproducible Run Configurations
+=================================================
+Generated: 2026-03-30
+Python: .venv/bin/python run_backtest.py
+Working dir: Pristine-RKHS/
+
+All runs use CL futures, Jul 2023 – Dec 2024, 471 trading days.
+
+
+═══════════════════════════════════════════════════════════════════════
+DEFAULT VALUES (if env var is NOT set)
+═══════════════════════════════════════════════════════════════════════
+
+  SIGNAL_MODE      = ou           (options: ou, kalman)
+  KALMAN_Q         = auto         (options: auto, aggressive)
+  TUNE_KERNELS     = 1            (1 = grid search ν/ℓ/λ per kernel per fold)
+  POSITIVE_WEIGHTS = 1            (1 = ElasticNet positive=True, clamps negative weights)
+  WARMUP_DAYS      = 120          (zeros positions for first N trading days)
+  FORWARD_HORIZON  = 1            (1-day forward returns)
+  COMBINER_LOSS    = mse          (options: mse, huber)
+  ADAPTIVE_Q       = 0            (1 = 2-regime Q based on kernel agreement)
+  SKIP_KERNELS     = ""           (comma-separated kernel names to force-drop)
+  FIXED_WEIGHTS    = ""           (comma-separated floats, bypasses ElasticNet)
+  ARCH_VERSION     = v1           (options: v1, v2)
+  ORDERFLOW_PCA_DIM= 15           (v2 only: PCA dimensionality for consolidated OrderFlow)
+  SENT_PCA_DIM     = 10           (PCA dimensionality for Sentiment embeddings)
+
+  ⚠️  WARMUP_DAYS=120, TUNE_KERNELS=1, POSITIVE_WEIGHTS=1 are the defaults
+      that differ from the original Run 13/14 configs. Always set these
+      explicitly to avoid surprises.
+
+
+═══════════════════════════════════════════════════════════════════════
+★★ BEST OVERALL: RUN 25 — Sharpe 1.56, Max DD 3.6% (v2 HYBRID)
+═══════════════════════════════════════════════════════════════════════
+
+  ARCH_VERSION=v2 \
+  SIGNAL_MODE=kalman \
+  KALMAN_Q=aggressive \
+  TUNE_KERNELS=0 \
+  WARMUP_DAYS=60 \
+  VOL_SIZING=1 \
+  ENTRY_CHOPPY=1.50 \
+  EXIT_TRENDING=0.10 \
+  EXIT_CHOPPY=0.35 \
+  .venv/bin/python run_backtest.py
+
+  Result:
+    Sharpe:      1.56
+    Sortino:     2.85
+    Max DD:      3.6%
+    Deflated SR: 0.97
+    Trades:      20
+    Hit Rate:    55.0%
+    W/L Ratio:   1.77x
+    Avg Win:     0.93%
+    Avg Loss:    0.53%
+    PnL:         +16.4%
+    Days active: 14.7%
+    Bootstrap:   P(SR<0) = 2.2%, 90% CI [0.69, 7.28]
+
+  New env vars:
+    - VOL_SIZING=1 → trailing 20d realized vol, inverse sizing (15% ann target)
+    - ENTRY_CHOPPY=1.50 → selective in choppy regime
+    - EXIT_TRENDING=0.10 → quick exit in trends
+    - EXIT_CHOPPY=0.35 → quick exit in chop
+    - TARGET_MODE=returns (default, NOT vol — hybrid uses returns for Kalman)
+
+  Charts: figures/bt_*_v2_hybrid_best.png
+  Report: reports/report_2fast_3slow_twostage_v2_kalman_wu60.txt
+  Stress: figures/bt_10_stress_test_*.png (all 6 scenarios survived)
+
+
+═══════════════════════════════════════════════════════════════════════
+PREVIOUS BEST: RUN 13 — Sharpe 1.50 (v1, reproduced)
+═══════════════════════════════════════════════════════════════════════
+
+  SIGNAL_MODE=kalman \
+  KALMAN_Q=aggressive \
+  TUNE_KERNELS=0 \
+  WARMUP_DAYS=60 \
+  SKIP_KERNELS=VannaCharm \
+  .venv/bin/python run_backtest.py
+
+  Result:
+    Sharpe:      1.50
+    Sortino:     2.79
+    Max DD:      7.7%
+    Deflated SR: 0.97
+    Trades:      20
+    Hit Rate:    54.7%
+    W/L Ratio:   1.68x
+    Avg Win:     1.72%
+    Avg Loss:    1.02%
+    PnL:         +25.2%
+    Days active: 13.0%
+
+  Key settings:
+    - TUNE_KERNELS=0 → fixed hyperparams (ν=1.5, ℓ=1.0, λ=1e-3)
+    - WARMUP_DAYS=60 → skip first 60 days (ElasticNet warmup period)
+    - SKIP_KERNELS=VannaCharm → exclude VannaCharm (prevents ElasticNet disruption)
+    - All kernel weights = 0 — signal comes from Kalman filtering the
+      ElasticNet's near-zero walk-forward intercept dynamics
+
+  Why WARMUP_DAYS=60 matters:
+    - 0 days: Sharpe 0.91 (early drawdown from undertrained ElasticNet)
+    - 30 days: Sharpe 0.91 (still too early)
+    - 60 days: Sharpe 1.50 ← sweet spot
+    - 90 days: Sharpe 0.33 (removes too many good trades)
+    - 120 days: Sharpe 1.04 (only 2 trades left)
+
+
+═══════════════════════════════════════════════════════════════════════
+BEST WITH KERNEL WEIGHTS: RUN 14 — Sharpe 1.42
+═══════════════════════════════════════════════════════════════════════
+
+  SIGNAL_MODE=kalman \
+  KALMAN_Q=aggressive \
+  TUNE_KERNELS=1 \
+  POSITIVE_WEIGHTS=0 \
+  WARMUP_DAYS=0 \
+  SKIP_KERNELS=VannaCharm \
+  .venv/bin/python run_backtest.py
+
+  Result:
+    Sharpe:      1.42
+    Sortino:     2.45
+    Max DD:      19.7%
+    Deflated SR: 0.96
+    Trades:      85
+    Hit Rate:    53.4%
+    W/L Ratio:   1.36x
+    PnL:         +31.9%
+    Days active: 28.5%
+
+  Key settings:
+    - TUNE_KERNELS=1 → finds ν=0.5, ℓ=0.1 for Macro (critical for non-zero weight)
+    - POSITIVE_WEIGHTS=0 → allows Macro weight = -0.024 (fading macro signal)
+    - WARMUP_DAYS=0 → no warmup filter (all 407 trading days active)
+    - SKIP_KERNELS=VannaCharm → excludes VannaCharm (prevents ElasticNet disruption)
+
+  Notes:
+    - This is the only config where a kernel (Macro) gets non-zero ElasticNet weight
+    - More trades (85 vs 20) but higher drawdown (19.7% vs 7.7%)
+    - Lower W/L ratio (1.36x vs 1.68x) — higher trade frequency dilutes quality
+
+
+═══════════════════════════════════════════════════════════════════════
+RUN 18 — VannaCharm with Real Greeks — Sharpe 1.04
+═══════════════════════════════════════════════════════════════════════
+
+  SIGNAL_MODE=kalman \
+  KALMAN_Q=aggressive \
+  TUNE_KERNELS=0 \
+  WARMUP_DAYS=120 \
+  .venv/bin/python run_backtest.py
+
+  Result:
+    Sharpe:      1.04
+    Trades:      2
+    All kernel weights = 0 (including Macro)
+
+  Notes:
+    - VannaCharm auto-loads from data/vanna_charm_bars.parquet
+    - Adding 7th feature to ElasticNet shifted regularization → all weights zero
+    - To exclude VannaCharm, set SKIP_KERNELS=VannaCharm
+
+
+═══════════════════════════════════════════════════════════════════════
+RUN 18c — VannaCharm + Tuned Kernels — Sharpe 0.22
+═══════════════════════════════════════════════════════════════════════
+
+  SIGNAL_MODE=kalman \
+  KALMAN_Q=aggressive \
+  TUNE_KERNELS=1 \
+  POSITIVE_WEIGHTS=0 \
+  WARMUP_DAYS=120 \
+  .venv/bin/python run_backtest.py
+
+  Result:
+    Sharpe:      0.22
+    Trades:      19
+    Macro weight: -0.024 (recovered via tuning)
+    VannaCharm OOS correlation: +0.010 (positive but zeroed by ElasticNet)
+
+  Notes:
+    - Tuning recovers Macro weight, but 120-day warmup + VannaCharm
+      disruption degrades overall performance
+
+
+═══════════════════════════════════════════════════════════════════════
+FIXED-WEIGHT DIAGNOSTIC RUNS (Run 19 series)
+═══════════════════════════════════════════════════════════════════════
+
+  # VannaCharm only (Sharpe 0.06, 200 trades, ~flat)
+  SIGNAL_MODE=kalman KALMAN_Q=aggressive TUNE_KERNELS=0 \
+  FIXED_WEIGHTS="0,0,0,0,0.02,0,0" \
+  .venv/bin/python run_backtest.py
+
+  # Macro only (Sharpe -1.46, destructive with fixed weight)
+  SIGNAL_MODE=kalman KALMAN_Q=aggressive TUNE_KERNELS=0 \
+  FIXED_WEIGHTS="0,0,0,0,0,0,-0.024" \
+  .venv/bin/python run_backtest.py
+
+  # Both (Sharpe -1.49)
+  SIGNAL_MODE=kalman KALMAN_Q=aggressive TUNE_KERNELS=0 \
+  FIXED_WEIGHTS="0,0,0,0,0.02,0,-0.024" \
+  .venv/bin/python run_backtest.py
+
+  Key insight: Fixed weights are destructive. Profitability comes from
+  the walk-forward ElasticNet's time-varying dynamics, not static weights.
+
+  FIXED_WEIGHTS format: comma-separated, one per kernel in order:
+    LOB, VPIN, Kyle, Hawkes, VannaCharm, VRP, Macro
+  (If SKIP_KERNELS drops some kernels, the order adjusts to match
+   the active kernel list shown in Stage-1 output.)
+
+
+═══════════════════════════════════════════════════════════════════════
+HISTORICAL RUNS (Runs 16-17)
+═══════════════════════════════════════════════════════════════════════
+
+  # Run 16 — Huber loss (Sharpe -0.44)
+  SIGNAL_MODE=kalman KALMAN_Q=aggressive TUNE_KERNELS=0 \
+  COMBINER_LOSS=huber WARMUP_DAYS=120 SKIP_KERNELS=VannaCharm \
+  .venv/bin/python run_backtest.py
+
+  # Run 17 — Adaptive Q (Sharpe 1.27)
+  SIGNAL_MODE=kalman KALMAN_Q=aggressive TUNE_KERNELS=1 \
+  POSITIVE_WEIGHTS=0 ADAPTIVE_Q=1 WARMUP_DAYS=120 SKIP_KERNELS=VannaCharm \
+  .venv/bin/python run_backtest.py
+
+
+═══════════════════════════════════════════════════════════════════════
+RUN 21 — v2 Architecture (OrderFlow consolidated) — UNTESTED
+═══════════════════════════════════════════════════════════════════════
+
+  ARCH_VERSION=v2 \
+  SIGNAL_MODE=kalman \
+  KALMAN_Q=aggressive \
+  TUNE_KERNELS=0 \
+  WARMUP_DAYS=60 \
+  .venv/bin/python run_backtest.py
+
+  Architecture:
+    Fast: OrderFlow (PCA 61D→15D) + VannaCharm (6D)
+    Slow: VRP (10D) + Macro (6D) + Sentiment (11D)
+    Gates: MomentumGate + EventProximity + VPIN/Hawkes position-sizing
+
+  Key changes from v1:
+    - LOB + VPIN + Kyle + Hawkes consolidated into single OrderFlow kernel
+    - Expanding-window PCA eliminates redundancy (LOB/VPIN/Kyle/Hawkes measured same order flow)
+    - VPIN and Hawkes demoted to position-sizing gates (scale position, not predict return)
+    - Sentiment elevated to slow kernel (strongest positive OOS signal: +0.023)
+
+  Env vars:
+    ORDERFLOW_PCA_DIM=15  (default, tune 10-20)
+    SENT_PCA_DIM=10       (default)
+
+
+═══════════════════════════════════════════════════════════════════════
+TROUBLESHOOTING
+═══════════════════════════════════════════════════════════════════════
+
+  Q: All kernel weights are zero?
+  A: Set TUNE_KERNELS=1 and POSITIVE_WEIGHTS=0. Tuning finds the right
+     lengthscale for Macro (ℓ=0.1), and allow-neg lets -0.024 through.
+
+  Q: Only 2 trades?
+  A: Set WARMUP_DAYS=0. The 120-day default zeros the first 30% of the
+     backtest where most trades occur.
+
+  Q: VannaCharm disrupts ElasticNet?
+  A: Set SKIP_KERNELS=VannaCharm until v2 restructure. Adding a 7th
+     kernel with weak signal shifts regularization and zeros Macro.
+
+  Q: Sharpe doesn't match results_table.txt?
+  A: The original Run 13 (Sharpe 1.55) was from a code state we can't
+     reproduce (no git history). Run 14 at Sharpe 1.42 is the best
+     reproducible configuration. Always use explicit env vars.

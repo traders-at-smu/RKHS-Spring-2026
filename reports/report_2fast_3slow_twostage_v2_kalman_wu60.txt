@@ -1,0 +1,57 @@
+======================================================================
+  PRISTINE-RKHS BACKTEST REPORT
+  Run: 2fast_3slow_twostage_v2_kalman_wu60
+  Generated: 2026-03-31 09:09:04
+======================================================================
+
+── PERFORMANCE SUMMARY ─────────────────────────────────────────────
+  Sharpe Ratio:       1.5581
+  Sortino Ratio:      1.0053
+  Max Drawdown:       -0.0361 (-3.61%)
+  Total P&L:          0.164387 (16.4387%)
+  Annualized Return:  10.18%
+  Annualized Vol:     6.53%
+
+── TRADE STATISTICS ────────────────────────────────────────────────
+  Trading Days:       407
+  Days in Position:   70 (17.2%)
+  Estimated Trades:   10
+  Hit Rate:           47.1%
+  Win/Loss Ratio:     2.41x
+  Avg Win:            0.9298%
+  Avg Loss:           -0.3850%
+  Best Day:           2.9733%
+  Worst Day:          -3.6062%
+
+── SIGNAL QUALITY ──────────────────────────────────────────────────
+  s-score range:      [-5.141, 9.950]
+  s-score NaN%:       4.2%
+  s-score mean:       0.1023
+  s-score std:        0.9626
+
+── BOOTSTRAP MONTE CARLO (10,000 sims) ────────────────────────────
+  Observed Sharpe:    3.8474
+  Bootstrap Mean:     3.9759
+  Bootstrap Median:   3.9541
+  90% CI:             [0.6934, 7.2771]
+  P(Sharpe < 0):      2.2%
+
+── CONFIGURATION ───────────────────────────────────────────────────
+  Architecture:       v2 (OrderFlow consolidated)
+  Signal Mode:        Kalman (aggressive Q)
+  Warmup Days:        60
+  Vol Sizing:         Enabled (15% target)
+  Fast Kernels:       OrderFlow (PCA 15D), VannaCharm (6D)
+  Slow Kernels:       VRP, Macro, Sentiment (PCA 10D)
+  Combiner:           Walk-forward ElasticNet
+  Position Sizing:    VPIN/Hawkes gates + inverse vol scaling
+
+── RISK ASSESSMENT ─────────────────────────────────────────────────
+  ✓ Sharpe > 1.0 — acceptable risk-adjusted return
+  ✓ Max DD < 5% — tight risk control
+  ✓ P(SR<0) < 5% — statistically significant
+  ⚠ 10 trades — low sample size, interpret with caution
+
+======================================================================
+  END OF REPORT
+======================================================================

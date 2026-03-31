@@ -1,0 +1,206 @@
+
+Pristine-RKHS/
+│
+├── run_backtest.py              Main entry point — runs full pipeline end-to-end
+│                                (also contains: Two-Stage ElasticNet combiner,
+│                                 Kalman filter signal extraction, Hawkes/Event
+│                                 feature builders, daily evaluation logic)
+├── data_loader.py               Data → kernel input bridge
+├── fetch_external_data.py       Pulls VIX, SPY, XLE, put/call, event calendar
+├── generate_charts.py           Generates all Midnight Ocean charts from results
+├── stress_test_run.py           Runs 6 stress scenarios on backtest results
+│
+├── kernels/                     10 RKHS kernel layers (from SMUAmeen/RKHS_Revised)
+│   ├── __init__.py
+│   ├── LOB.py                   Limit order book (fast) — VolumeProfile, BookShape, DepthImbalance
+│   ├── VPIN.py                  Volume-sync probability of informed trading (fast)
+│   ├── Kyles_Lambda.py          Kyle's Lambda price impact (fast) — CKA gated vs VPIN
+│   ├── Hawkes.py                Hawkes self-exciting process (fast) — CKA gated vs VPIN
+│   ├── VannaCharm.py            Options vanna/charm hedging flow (fast) — SHELVED (needs real Greeks)
+│   ├── GammaExposure.py         Gamma exposure + OI ratio (fast) — SHELVED (needs real Greeks)
+│   ├── VRP.py                   Volatility risk premium (slow — daily)
+│   ├── MacroMotion.py           Macro momentum + fractional diff (slow)
+│   ├── SentimentAnalysis.py     FinBERT news embeddings (slow) — BLOCKED (needs news API)
+│   ├── EventProximity.py        FOMC/CPI/NFP calendar proximity (gate)
+│   └── momentum_gate.py         Arjan's momentum regime gate (gate)
+│
+├── backtesting/                 Walk-forward engine + signal generation
+│   ├── __init__.py
+│   ├── walk_forward.py          PurgedWalkForward, TwoLevelKernelCombiner,
+│   │                            CPCVEvaluator, CKARedundancyGate, CombinedKernel,
+│   │                            FeatureMatrixKernel, MultiResolutionAligner
+│   ├── signal_definition.py     OU + Kalman filter signal extraction,
+│   │                            multi-horizon aggregation (h=10,30,60),
+│   │                            regime-conditional thresholds, s-score generation
+│   ├── hyperparameter_cv.py     NestedCV, MKLOptimizer, PurgedKFold
+│   ├── metrics.py               DSR, Sortino, CKA, effective dim, OOS NLL
+│   ├── visualize_backtest.py    15-figure publication dashboard (legacy)
+│   └── test_pipeline.py         11 synthetic end-to-end tests
+│
+├── analytics/                   Risk, portfolio, Monte Carlo (from Nyx)
+│   ├── __init__.py
+│   ├── bootstrap_mc.py          1K stationary block bootstrap, equity fan paths
+│   ├── stress_test.py           6 canonical scenarios (COVID, GFC, Volmageddon,
+│   │                            Negative Oil, Flash Crash, 2022 Rate Shock)
+│   ├── trade_simulator.py       TP/SL/time-stop exits, per-trade P&L
+│   ├── alpha.py                 Rolling Sharpe, Sortino, alpha vs SPY, IR
+│   ├── allocation.py            Fractional Kelly, regime gate, vol targeting
+│   ├── scorecard.py             Strategy health (HEALTHY/WARNING/CRITICAL)
+│   └── pnl_attribution.py      Regime × strategy P&L breakdown
+│
+├── reporting/                   Midnight Ocean theme + chart library
+│   ├── __init__.py
+│   ├── theme.py                 Deep navy (#0B1426) / teal (#00D4AA) / coral (#FF6B6B) /
+│   │                            gold (#FFD93D) palette, ocean_style() context manager
+│   └── charts.py                8 charts: equity+drawdown, pred vs actual, return dist,
+│                                rolling Sharpe, MC fan, kernel weights, scorecard, stress test
+│
+├── figures/                     Generated charts (Midnight Ocean theme)
+│   ├── bt_01_equity_*.png           Cumulative P&L + drawdown
+│   ├── bt_02_pred_vs_actual_*.png   OOS predictions scatter (corr annotation)
+│   ├── bt_03_return_dist_*.png      Strategy return histogram (skew/kurt)
+│   ├── bt_04_rolling_sharpe_*.png   252-bar rolling Sharpe (pos=teal, neg=coral)
+│   ├── bt_05_mc_fan_*.png           1K bootstrap equity fan (5/10/25/75/90/95 pctiles)
+│   ├── bt_06_kernel_weights_*.png   MKL weight allocation (fast/slow split)
+│   ├── bt_07_scorecard_*.png        Strategy scorecard (all metrics)
+│   └── bt_10_stress_test_*.png      6-scenario stress test (equity/DD/Sharpe)
+│
+├── backtest_results_*.npz       Saved results per run configuration
+│   ├── *_baseline.npz               Run 1:  3F+2S uniform weights
+│   ├── *_mkl_optimized.npz          Run 2:  3F+2S MKL
+│   ├── *_4fast_2slow_*.npz          Runs 3-6: various kernel configs
+│   ├── *_twostage.npz               Run 7:  Two-stage ElasticNet + OU
+│   ├── *_5d_horizon.npz             Run 8:  5-day forward target
+│   ├── *_10d_horizon.npz            Run 9:  10-day forward target
+│   ├── *_kalman.npz                 Run 10: Kalman (auto Q)
+│   ├── *_kalman_aggressive.npz      Run 11: Kalman (aggressive Q)
+│   ├── *_warmup_lowthresh.npz       Run 12: Warm-up + lower thresholds
+│   └── *_twostage_kalman.npz        Run 13: BEST — Two-stage + aggressive Kalman
+│
+└── data/                        Market data (471 trading days, Jul 2023 – Dec 2024)
+    ├── trades_CL_full.parquet           533 MB   36.7M trade ticks
+    ├── ohlcv1m_CL_full.parquet            7 MB   492K 1-min bars
+    ├── definition_CL_FUT_full.parquet    14 MB   866K contract defs
+    ├── statistics_LO_OPT_full.parquet   2.2 GB   168M options rows
+    │
+    ├── LOB/
+    │   ├── lob_features_CL/             471 .npz  (volume profile, book shape, depth imbalance)
+    │   ├── lob_snapshots_CL/            471 .pkl  (raw bid/ask at 5 levels)
+    │   └── gram_matrices_CL/            336 .npz  (precomputed eigenvalues, length scales)
+    │
+    └── external/                        Fetched by fetch_external_data.py
+        ├── vix_daily.parquet            378 rows  → VRP kernel
+        ├── spy_daily.parquet            378 rows  → MacroMotion kernel
+        ├── xle_daily.parquet            378 rows  → MacroMotion kernel
+        ├── put_call_ratio.parquet       471 rows  → VRP kernel
+        └── event_calendar.parquet        72 events → EventProximity kernel
+
+
+================================================================================
+SIGNAL PIPELINE (Run 13 — Best Configuration)
+================================================================================
+
+raw data → data_loader.py → kernel-ready inputs
+                               ↓
+    ┌──────────── STAGE 1: Per-Kernel KRR ────────────┐
+    │                                                   │
+    │  LOB ──→ KRR ──→ pred_lob[t]                     │
+    │  VPIN ─→ KRR ──→ pred_vpin[t]                    │
+    │  Kyle ─→ KRR ──→ pred_kyle[t]    (CKA < 0.5)    │
+    │  Hawkes → KRR ──→ pred_hawkes[t]  (CKA < 0.75)   │
+    │  VRP ──→ KRR ──→ pred_vrp[t]                     │
+    │  Macro → KRR ──→ pred_macro[t]                   │
+    │                                                   │
+    └──────────────────────────────────────────────────┘
+                               ↓
+    ┌──────────── STAGE 2: ElasticNet Combiner ────────┐
+    │                                                   │
+    │  [pred_lob, pred_vpin, pred_kyle,                │
+    │   pred_hawkes, pred_vrp, pred_macro]             │
+    │        ↓                                          │
+    │   ElasticNet (walk-forward CV)                    │
+    │        ↓                                          │
+    │   combined_prediction[t]                          │
+    │   (currently ≈ 0 — elastic-net zeros all weights) │
+    │                                                   │
+    └──────────────────────────────────────────────────┘
+                               ↓
+    ┌──────────── SIGNAL EXTRACTION ───────────────────┐
+    │                                                   │
+    │  Kalman Filter (aggressive Q = 10x auto)         │
+    │        ↓                                          │
+    │  filtered_signal[t]                               │
+    │        ↓                                          │
+    │  s-score = (signal - μ) / σ                      │
+    │        ↓                                          │
+    │  Regime-conditional thresholds:                   │
+    │    Trending: entry ±0.50, exit ±0.15, TP ±1.50   │
+    │    Choppy:   entry ±0.50, exit ±0.15, TP ±1.50   │
+    │        ↓                                          │
+    │  positions[t] ∈ {-1, 0, +1}                      │
+    │                                                   │
+    └──────────────────────────────────────────────────┘
+                               ↓
+    ┌──────────── GATES ──────────────────────────────┐
+    │                                                   │
+    │  MomentumGate (Arjan):                           │
+    │    gate(t) ∈ (0,1) from TSMOM + vol-scaled       │
+    │    momentum + EMA cross → Schur product on       │
+    │    K_slow before combining with K_fast            │
+    │                                                   │
+    │  EventProximity:                                  │
+    │    gate(t) ∈ (0.5, 1.0) from proximity to        │
+    │    FOMC/CPI/NFP/OpEx → attenuates signal         │
+    │    near scheduled events                          │
+    │                                                   │
+    └──────────────────────────────────────────────────┘
+                               ↓
+    ┌──────────── EVALUATION ─────────────────────────┐
+    │                                                   │
+    │  Daily resolution (collapsed from bar-level)     │
+    │  Transaction costs: 1-tick ($10) per trade       │
+    │  Walk-forward: 8 expanding folds, 100-bar embargo│
+    │                                                   │
+    └──────────────────────────────────────────────────┘
+                               ↓
+    analytics/ (MC fan, stress test, scorecard)
+                               ↓
+    reporting/ (Midnight Ocean themed charts)
+
+
+================================================================================
+KERNEL STATUS
+================================================================================
+
+  ACTIVE (6/10):
+    Fast:  LOB, VPIN, Kyle's Lambda, Hawkes
+    Slow:  VRP, MacroMotion
+
+  GATES (2):
+    MomentumGate (Arjan) — regime gating on K_slow
+    EventProximity — calendar proximity gating
+
+  SHELVED (2):
+    VannaCharm — needs real Greeks (Black-Scholes or better)
+    GammaExposure — needs real Greeks
+
+  BLOCKED (1):
+    SentimentAnalysis — needs news API from Anders' team
+
+  NULL TEST RESULT:
+    Kernels confirmed contributing — null test (no kernels) produces
+    Sharpe -0.76 vs +1.55 with kernels. The kernels act as a noise
+    filter, not a return predictor.
+
+
+================================================================================
+BEST RESULT (Run 13)
+================================================================================
+
+  Sharpe:       1.55        Sortino:      2.76
+  Max DD:       8.1%        Total P&L:    +32.8%
+  Hit Rate:     54.7%       W/L Ratio:    1.46x
+  Deflated SR:  0.97        Trades:       30
+  Days Active:  86/407 (21.1%)
+  Transaction costs included (1-tick per trade)
+  Survives all 6 stress scenarios (worst: GFC at -15% DD)

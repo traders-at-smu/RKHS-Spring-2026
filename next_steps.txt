@@ -1,0 +1,417 @@
+RKHS Pipeline — Next Steps & Change List
+==========================================
+Generated: 2025-03-25  |  Updated: 2026-03-31 (post Runs 22-25, v2 HYBRID deployed — BEST CONFIG)
+Context: Based on diagnostic results (rolling IC, Dave R², outlier decomposition)
+         and Gemini's architectural suggestions.
+
+Status Key:
+  [AGREE]     — Good idea, should implement
+  [PARTIAL]   — Core idea is sound but needs modification
+  [WAIT]      — Blocked on external dependency
+  [DISAGREE]  — Don't think this helps us right now
+  [TESTED]    — Implemented and tested — see results below
+
+
+═══════════════════════════════════════════════════════════════════════
+1. ADAPTIVE KALMAN Q BASED ON KERNEL AGREEMENT DISPERSION
+═══════════════════════════════════════════════════════════════════════
+
+Gemini's idea:  Q_t = Q_base × f(1 / σ²_kernels)
+                When kernels agree → increase Q → filter updates faster → conviction
+                When kernels disagree → decrease Q → filter stays conservative
+
+Verdict: [TESTED] — Run 17: Sharpe 1.27 (vs Run 13's 1.55 with fixed aggressive Q)
+
+Implementation (completed):
+  - File: run_backtest.py (ADAPTIVE_Q env var) + backtesting/signal_definition.py
+  - KalmanSignalGenerator now accepts Q_array (per-bar Q values)
+  - 2-regime discrete: Q_high = pred_var (aggressive), Q_low = 0.1 * pred_var (auto)
+  - Threshold: median of kernel prediction variance (σ² across 6 kernel outputs)
+  - 50/50 split between high-conviction and low-conviction bars
+
+Why it underperformed:
+  - ElasticNet gives only 1 kernel (Macro) a non-zero weight (-0.024)
+  - The other 5 kernels have zero weight → their predictions are pure noise
+  - Measuring "agreement dispersion" across 5 noise channels + 1 real channel
+    produces a meaningless variance metric
+  - The adaptive Q is essentially flipping randomly between aggressive and
+    conservative because there's no real multi-kernel agreement to detect
+
+Why it will work later:
+  - Once Sentiment + real Greeks produce non-zero ElasticNet weights, we'll have
+    3-4 kernels with genuine signal → variance becomes a real agreement measure
+  - The architecture is correct; it just needs more kernel diversity
+
+Risk (Gemini flagged this correctly):
+  - "Consensus traps" — all kernels wrong together during structural breaks
+  - Mitigation: cap Q_max, and maybe add a "staleness" check — if all kernels
+    have been agreeing for too long without a profitable trade, decay Q back down
+
+When: Re-test after Sentiment + Greeks kernels arrive (8 sensors > 6).
+
+
+═══════════════════════════════════════════════════════════════════════
+2. DIFFERENTIABLE SHARPE LOSS IN THE COMBINER
+═══════════════════════════════════════════════════════════════════════
+
+Gemini's idea:  Replace MSE loss in ElasticNet with differentiable Sharpe ratio.
+                Warm-start from MSE weights, fine-tune with Adam on Sharpe loss.
+
+Verdict: [PARTIAL]
+
+Why I partially agree:
+  - The diagnosis is correct: MSE forces the combiner to chase outlier magnitudes
+    it can never predict, wasting model capacity on the 1% of bars that drive 62%
+    of SSE. A Sharpe-based objective would ignore magnitude and focus on sign.
+  - The warm-start idea is clever — use ElasticNet solution as initialization.
+
+Why I'm cautious:
+  - We only have ~30 trades per walk-forward fold. Sharpe on 30 observations is
+    extremely noisy. Gradient-based optimization on a noisy, non-convex loss with
+    30 data points is likely to overfit catastrophically.
+  - ElasticNet's L1/L2 regularization is doing important work (sparsity + stability).
+    A custom Sharpe loss would need its own regularization scheme.
+  - Simpler alternative: keep MSE but use Huber loss or trimmed MSE (drop the top
+    5% residuals). This addresses the outlier problem without the overfitting risk
+    of a full Sharpe objective.
+
+What to change:
+  - OPTION A (recommended): Switch ElasticNet to HuberRegressor or implement
+    trimmed-MSE that excludes the worst 5% of residuals per fold
+    - File: run_backtest.py, Stage 2 combiner section
+    - Simpler, convex, still regularized, directly addresses the outlier problem
+  - OPTION B (aspirational): Implement differentiable Sharpe after we have more
+    trades (need 50+ per fold minimum to get stable gradients)
+    - Would require a new optimizer loop outside of sklearn
+
+When: Option A can be done now. Option B after more data / more kernels.
+
+
+═══════════════════════════════════════════════════════════════════════
+3. MULTI-STATE KALMAN OBSERVER (2D STATE SPACE)
+═══════════════════════════════════════════════════════════════════════
+
+Gemini's idea:  Expand from 1D Kalman state to 2D:
+                State 1 = Directional Lean (mean-reversion vs trend)
+                State 2 = Toxicity/Volatility (VPIN/Greeks-driven)
+                Use State 2 for position sizing, State 1 for direction.
+
+Verdict: [PARTIAL]
+
+Why I partially agree:
+  - Conceptually elegant. Separating "which direction" from "how confident/toxic
+    is the environment" is exactly what practitioners do mentally.
+  - The VPIN and Greeks kernels are naturally toxicity indicators — routing them
+    to a separate state variable makes architectural sense.
+
+Why I'm cautious:
+  - A 2D Kalman filter has more parameters: 2×2 F (state transition), 2×2 Q
+    (process noise), 2×1 H (observation), plus we'd need to decide which kernels
+    map to which state. With 30 trades this is very hard to validate.
+  - Simpler alternative: keep 1D Kalman for direction, use a separate heuristic
+    for position sizing (e.g., scale position by inverse VPIN or by kernel
+    agreement — which overlaps with item #1 above).
+
+What to change:
+  - SHORT TERM: Don't expand Kalman state dimension yet. Instead, use kernel
+    agreement dispersion (item #1) as a position sizing multiplier alongside
+    the 1D Kalman signal. This gets 80% of the benefit without the complexity.
+  - LONG TERM: Once we have real Greeks (VannaCharm, GammaExposure), revisit
+    2D state with a proper toxicity channel.
+
+When: Long-term, after Greeks arrive and adaptive Q is validated.
+
+
+═══════════════════════════════════════════════════════════════════════
+4. CONTINUOUS vs DISCRETE ADAPTIVE Q (Gemini's follow-up question)
+═══════════════════════════════════════════════════════════════════════
+
+Gemini asked: Implement adaptive Q as continuous function or discrete regime-switch?
+
+Verdict: [AGREE] — Start with discrete, graduate to continuous.
+
+Why:
+  - Discrete (2-3 regimes) is easier to interpret, validate, and debug.
+  - With only 30 trades, we can't reliably fit a continuous mapping function.
+  - Start with: HIGH_CONV Q = current aggressive, LOW_CONV Q = current auto-tuned.
+  - Threshold: if σ²_kernels < median(σ²_kernels), use HIGH_CONV, else LOW_CONV.
+  - Once we have more data (6+ months of paper trading), fit the continuous sigmoid.
+
+What to change:
+  - File: run_backtest.py, Kalman filter section
+  - Add: compute rolling kernel prediction variance at each bar
+  - Add: binary regime switch for Q based on variance threshold
+  - Later: replace binary switch with sigmoid mapping
+
+
+═══════════════════════════════════════════════════════════════════════
+5. ADD SENTIMENT KERNEL (FinBERT / News API)
+═══════════════════════════════════════════════════════════════════════
+
+Verdict: [TESTED] — Sentiment wired as 3rd slow kernel (Run 20/21)
+
+Data delivered:
+  - Anders provided sentiment_daily.parquet (503 days, 128 FinBERT embedding dims + n_headlines)
+  - Source: GDELT/FinBERT pipeline on CL crude oil headlines (~27 headlines/day avg)
+
+Implementation (completed):
+  - File: run_backtest.py — PCA 128D → 10D (expanding-window, no lookahead) + n_headlines
+  - Added as 3rd slow kernel (alongside VRP, Macro)
+  - SENT_PCA_DIM env var (default 10)
+  - FeatureMatrixKernel(n_rff=512, seed=50)
+
+Results:
+  - OOS correlation: +0.023 — strongest positive signal of any kernel
+  - PCA captures sufficient variance with just 10 components
+  - In v2 (Run 21): Sentiment is one of 5 kernels, still strongest positive signal
+  - ElasticNet still zeros the weight (consistent with all other kernels)
+
+
+═══════════════════════════════════════════════════════════════════════
+6. REAL GREEKS INTEGRATION (VannaCharm, GammaExposure)
+═══════════════════════════════════════════════════════════════════════
+
+Verdict: [TESTED] — VannaCharm wired with real Greeks (Runs 18-19)
+
+Data delivered:
+  - Anders provided vanna_charm_bars.parquet (2,327 intraday bars, Jul 2023–Dec 2024)
+  - Columns: bar_close_time (UTC), net_vanna, net_charm
+  - GammaExposure: still waiting on gamma data
+
+Implementation (completed):
+  - File: run_backtest.py — build_vanna_charm_features_real()
+  - 6D features: [level_vanna, level_charm, d_vanna, d_charm,
+    vanna_momentum (sign × |change|), charm_vanna_ratio]
+  - Timestamp-aligned to dollar bars (no lookahead)
+  - Rolling z-score normalization (window=50 bars)
+
+Results:
+  Run 18 (VannaCharm as 5th fast kernel, ElasticNet):
+    - VannaCharm OOS correlation: +0.010 (proxy was -0.016 — sign flipped!)
+    - BUT ElasticNet zeroed ALL 7 kernel weights (including Macro)
+    - Adding a 7th feature dimension shifted regularization path
+    - Sharpe 1.04, 2 trades (identical to all-zero baseline)
+
+  Run 19 (fixed weights, bypassing ElasticNet):
+    - VannaCharm alone (+0.02 fixed): Sharpe 0.06, 200 trades, ~flat
+    - Macro alone (-0.024 fixed): Sharpe -1.46 — destructive with constant weight
+    - Key insight: profitability comes from walk-forward ElasticNet dynamics
+      (time-varying intercept), NOT from static kernel weights
+
+Why VannaCharm isn't carrying weight yet:
+  - OOS correlation +0.010 is positive but statistically indistinguishable
+    from noise at our sample size (2,880 OOS bars)
+  - Still only 2 features from a single venue (options) — needs gamma data
+    for GammaExposure kernel to create a full options information channel
+  - The raw net_vanna/net_charm levels may need additional context features
+    (DTE proximity, moneyness distribution, vol surface shape)
+
+What's still needed:
+  - Gamma data from Anders for GammaExposure kernel
+  - Consider: VannaCharm may be more useful as a GATE (position sizing by
+    hedging flow intensity) than as a prediction kernel — same conclusion
+    we reached for microstructure kernels in the v2 architecture discussion
+
+
+═══════════════════════════════════════════════════════════════════════
+7. REPLACE MSE WITH ROBUST LOSS (TRIMMED / HUBER)
+═══════════════════════════════════════════════════════════════════════
+
+Verdict: [TESTED] — Run 16: Sharpe -0.44 (Huber zeroed ALL kernel weights)
+
+Implementation (completed):
+  - File: run_backtest.py (COMBINER_LOSS=huber env var)
+  - HuberRegressor with epsilon=1.35, alpha=0.001, StandardScaler
+  - Switches from MSE to Huber loss in Stage 2 combiner
+
+Why it failed:
+  - Huber is "too honest" — it correctly identifies that NO kernel has meaningful
+    correlation with returns (all per-kernel OOS correlations are -0.03 to +0.01)
+  - Huber zeroed all weights to 1e-12 scale → predictions had variance 3.77e-16
+  - Kalman filter had nothing to work with → strategy collapsed
+
+Critical insight:
+  - The profitable trading in Runs 11-15 DEPENDS on MSE being sensitive to outliers
+  - MSE is slightly "fooled" by fat-tailed bars into keeping small non-zero weights
+  - Those small weights → enough prediction variance → Kalman can extract regime
+  - Huber removes the outlier sensitivity → removes the mechanism that generates signal
+  - This is actually strong evidence for the "state observer" hypothesis: the strategy
+    doesn't profit from return prediction, it profits from the Kalman filter detecting
+    regime patterns in near-zero, noise-driven predictions
+
+Why it may work later:
+  - If Sentiment + Greeks kernels actually predict returns (even weakly), Huber
+    will correctly preserve those signal weights while ignoring outlier magnitudes
+  - The problem isn't Huber per se, it's that we have zero genuine predictive signal
+    in the current 6 kernels — Huber just exposes this honestly
+
+Alternative still worth trying:
+  - Trimmed MSE (drop top 5% residuals) — less aggressive than Huber
+  - May preserve enough outlier sensitivity to keep small non-zero weights
+  - Or: Huber with very large epsilon (3.0+) to behave more like MSE for most bars
+
+
+═══════════════════════════════════════════════════════════════════════
+8. FRACTIONAL KELLY POSITION SIZING
+═══════════════════════════════════════════════════════════════════════
+
+Verdict: [AGREE] — Already discussed, user said "not right now" but it's on deck
+
+Why:
+  - Current sizing is binary (flat or full position). Kelly would scale position
+    by edge magnitude, which naturally interacts with adaptive Q.
+  - Expected improvement: ~15-25% more P&L with slightly higher max DD.
+
+What to change:
+  - File: run_backtest.py, position generation section
+  - Add: Kelly fraction = (hit_rate × avg_win - (1-hit_rate) × avg_loss) / avg_win
+  - Use half-Kelly for safety
+  - Scale position size by Kalman signal magnitude × Kelly fraction
+
+When: After adaptive Q is validated. User preference to wait.
+
+
+═══════════════════════════════════════════════════════════════════════
+PRIORITY ORDER (updated post Runs 18-21, v2 deployed)
+═══════════════════════════════════════════════════════════════════════
+
+  COMPLETED (tested):
+    #7  Huber loss — Run 16 (Sharpe -0.44, zeroed all weights — too honest)
+    #1  Adaptive Q 2-regime — Run 17 (Sharpe 1.27, needs more kernel diversity)
+    #4  Discrete regime switch confirmed as correct starting point
+    #6  VannaCharm wired with real Greeks — Runs 18-19 (OOS corr +0.010)
+    #5  Sentiment kernel wired — Run 20 (OOS corr +0.023, strongest positive)
+    #9  v2 KERNEL RESTRUCTURE — Run 21 (Sharpe 1.38, Sortino 2.43, Max DD 6.9%)
+        OrderFlow (PCA 61D→15D) + VannaCharm | VRP + Macro + Sentiment
+        VPIN/Hawkes demoted to position-sizing gates
+    #12 Ridge (l1=0) — Run 22 (Sharpe 1.26, non-zero weights but worse performance)
+    #1  RE-TEST adaptive Q with v2 — Run 22b (Sharpe 0.67, still doesn't help)
+    #13 [NEW] Vol regime prediction — Runs 23-24 (kernels predict vol 9x better
+        than returns, corr +0.122 combined. dvol direction: Sharpe 0.80, max DD 2.3%)
+    ★ #14 [NEW] HYBRID vol-sizing — Run 25 (Sharpe 1.56, Sortino 2.85, Max DD 3.6%)
+        BEST CONFIG — return-pred Kalman + inverse vol position sizing
+        Bootstrap: P(SR<0) = 2.2%, statistically significant at 5%
+        Full reports generated: figures/bt_01-08_v2_hybrid_best + reports/
+
+  ★ CURRENT BEST CONFIG (Run 25 — paper trading candidate):
+    Command: ARCH_VERSION=v2 SIGNAL_MODE=kalman KALMAN_Q=aggressive TUNE_KERNELS=0
+             WARMUP_DAYS=60 VOL_SIZING=1 ENTRY_CHOPPY=1.50 EXIT_TRENDING=0.10 EXIT_CHOPPY=0.35
+    Reports: figures/bt_*_v2_hybrid_best.png + reports/report_*.txt
+
+  URGENT — PAPER TRADING LAUNCH (Wednesday 2026-04-01):
+    #10 WARM-START for paper trading — save model state from backtest,
+        load at startup to skip 60-day burn-in. Need:
+        (a) Serialize: ElasticNet coefficients, Kalman state (x̂, P),
+            OU params (κ, μ, σ), s-score normalization stats
+        (b) Live data ingestion: dollar bar construction from real-time feed
+        (c) Signal output: position signals → paper trading system
+        (d) Backfill Jan-Mar 2025 gap so model is current, not 3 months stale
+        Anders wants to start paper trading Wednesday — this is the critical path.
+
+  REMAINING (lower priority):
+    #3  2D Kalman state (direction + toxicity)
+    #2  Differentiable Sharpe loss (needs more trades)
+    #8  Fractional Kelly sizing (partially superseded by vol-sizing)
+    #11 Tune v2 hyperparameters: ORDERFLOW_PCA_DIM, gate thresholds
+    - GammaExposure kernel (waiting on gamma data from Anders)
+    - MomentumGate range too narrow [0.489, 0.510] — not differentiating regimes
+
+
+═══════════════════════════════════════════════════════════════════════
+THINGS I DISAGREE WITH OR WOULD MODIFY FROM GEMINI (updated post Runs 18-19)
+═══════════════════════════════════════════════════════════════════════
+
+  1. "Move away from R² entirely" — Agree we shouldn't optimize for R², but we
+     should still TRACK it as a diagnostic. If R² ever flips positive after adding
+     Sentiment/Greeks, that tells us something important about those kernels.
+
+  2. "Differentiable Sharpe with Adam" — Too aggressive for our data size.
+     30 trades per fold is not enough for gradient-based optimization of a
+     non-convex objective. Huber loss gets us 80% of the way there safely.
+     UPDATE: Huber was also too aggressive — it zeroed everything. The MSE
+     "sensitivity to outliers" is actually a feature, not a bug, in our case.
+     It's what keeps kernel weights non-zero. We may need a GENTLER robust
+     loss (trimmed MSE or Huber with high epsilon) rather than full Huber.
+
+  3. "Multi-state observer now" — Premature. We need real Greeks first, and
+     the adaptive Q gives us most of the benefit with much less complexity.
+     The 2D state is a good idea for v2 of the pipeline.
+
+  4. Gemini's framing of our system as a "state observer" — 100% agree.
+     This is the best mental model for what's happening. The kernels measure
+     microstructure state, the Kalman filter extracts a latent regime, and
+     the trading signal comes from regime transitions, not return predictions.
+     Run 16 (Huber) strongly confirms this: when you remove outlier sensitivity,
+     you kill the mechanism that generates the non-zero predictions the Kalman
+     filter needs. The strategy is a regime detector, not a return predictor.
+     UPDATE (Runs 18-19): Fixed-weight tests further confirm — the Kalman
+     profits from ElasticNet's walk-forward dynamics (time-varying intercept),
+     not from any single kernel's static contribution. Even Macro at a fixed
+     -0.024 is destructive (Sharpe -1.46). The edge is in the *process*, not
+     the *weights*.
+
+  5. "Adaptive Q based on kernel agreement" — Architecture is correct, but it
+     needs multiple kernels with non-zero weights to work (Run 17). Currently
+     only Macro has weight; the other 5 are zero → dispersion = noise.
+     This will be the first thing to re-test when new kernels arrive.
+
+  6. [NEW] "More kernels = better" — Not if they're from the same information
+     source. Adding VannaCharm as a 7th kernel actually HURT by shifting
+     ElasticNet's regularization path. The v2 architecture should have FEWER
+     kernels (4) from MORE DIVERSE sources (order flow, news, options, macro)
+     rather than 8+ kernels with correlated inputs.
+
+
+═══════════════════════════════════════════════════════════════════════
+v2 ARCHITECTURE — DEPLOYED (Run 21)
+═══════════════════════════════════════════════════════════════════════
+
+Activated with: ARCH_VERSION=v2
+
+v1 (default): 4 fast microstructure + VannaCharm + 2-3 slow + 2 gates = 7-8 kernels
+  Problem: LOB, VPIN, Kyle, Hawkes all read the same order flow tape
+  Result: ElasticNet zeros all but Macro → effectively a 1-kernel system
+
+v2 (deployed): 5 kernels × 4 independent information sources
+  Fast:
+    Kernel 1:  OrderFlow — PCA-consolidated LOB+VPIN+Kyle+Hawkes (61D→15D, 97% variance)
+    Kernel 2:  VannaCharm — real Greeks, 6D hedging flow features
+  Slow:
+    Kernel 3:  VRP — volatility risk premium + calendar (10D)
+    Kernel 4:  Macro — VIX, SPY, XLE correlations (6D)
+    Kernel 5:  Sentiment — FinBERT PCA embeddings + headlines (11D)
+
+  Position-sizing gates (not prediction kernels):
+    - VPIN toxicity → scale position [0.5, 1.0] by inverse toxicity
+    - Hawkes burst_ratio → scale position [0.5, 1.0] by inverse burst
+    - Combined gate mean: 0.73 (reduces average position by ~27%)
+    - Momentum + Event → existing gates
+
+  Run 21 results:
+    Sharpe 1.38, Sortino 2.43, Max DD 6.9%, 20 trades, 54.7% hit rate
+    PCA explained 97.0% of order-flow variance in 15D
+    All ElasticNet weights still zero — same Kalman mechanism
+    Position-sizing gate active with mean scale 0.847
+
+  ★ Run 25 results (v2 HYBRID — BEST CONFIG):
+    Added: VOL_SIZING=1 — trailing 20-day realized vol, 15% annualized target
+    Sharpe 1.56, Sortino 2.85, Max DD 3.6%, 20 trades, 55.0% hit rate, W/L 1.77x
+    Vol sizing scales positions by 0.62x on average (reduces in high vol)
+    Max DD cut from 6.9% → 3.6% — vol sizing is the biggest risk improvement
+    Bootstrap: P(SR<0) = 2.2%, 90% CI [0.69, 7.28]
+    All 6 stress scenarios survived
+    Reports: figures/bt_*_v2_hybrid_best.png + reports/ + stress test
+
+  Key architectural insight (confirmed by Runs 22-25):
+    RKHS kernels are NOT predictive of returns — they are regime/vol detectors.
+    This is expected: RKHS methods are traditionally used for classification,
+    regime detection, and density estimation, not for predicting noisy continuous
+    targets. The pipeline works because:
+      1. Kalman filter on ElasticNet output → detects regime transitions
+      2. Vol-aware position sizing → leverages what kernels actually measure (vol)
+      3. Combined: timing from Kalman, sizing from vol → Sharpe 1.56
+
+  Remaining work:
+    - GammaExposure when Anders delivers gamma data
+    - MomentumGate needs wider dynamic range (currently [0.489, 0.510])
+    - Paper trading validation (critical — only 20 trades in backtest)

@@ -1,0 +1,23 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+
+# Data (too large for git — shared via Google Drive)
+data/
+
+# Backtest results (regenerable from code + data)
+*.npz
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# Secrets
+.env
+credentials.json
