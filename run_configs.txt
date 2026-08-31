@@ -1,3 +1,8 @@
+!!! INVALID — SUPERSEDED BY THE ALIGNMENT FIX (see POSTMORTEM.md) !!!
+The results recorded against these configs came from a pipeline with four
+time-alignment bugs. The configs themselves are still valid to run; the
+numbers attached to them are not.
+
 RKHS Pipeline — Reproducible Run Configurations
 =================================================
 Generated: 2026-03-30

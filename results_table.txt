@@ -1,3 +1,17 @@
+!!! INVALID — SUPERSEDED BY THE ALIGNMENT FIX !!!
+=================================================================
+Every number below was produced by a pipeline with four time-alignment
+bugs. Fast kernels were matched by row number rather than by time, and
+the out-of-sample forward-return target was identically zero, so the
+ElasticNet collapsed to an intercept and the Kalman filter scored
+fold-boundary drift as signal.
+
+See POSTMORTEM.md. On the fixed pipeline the Run 25 config gives
+Sharpe 1.10, Sortino 1.63, Max DD 2.6%, Deflated SR 0.76 — with a
+Stage-2 OOS R2 of -0.0011 and near-zero kernel weights, so that is not
+evidence of edge either. Do not quote anything below without re-running.
+=================================================================
+
 RKHS Backtest Results — All 25 Runs
 =====================================
 CL Futures | Jul 2023 - Dec 2024 | 471 trading days | 36.7M trade ticks

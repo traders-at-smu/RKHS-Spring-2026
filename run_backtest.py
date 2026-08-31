@@ -39,6 +39,10 @@ sys.path.insert(0, os.path.join(_ROOT, "reporting"))
 
 import pandas as pd
 from data_loader import DataLoader, LOBSnapshot
+from feature_alignment import (
+    to_epoch_seconds, build_master_bar_schedule, align_fast_features,
+    first_valid_bar, check_target_not_degenerate, reindex_daily,
+)
 
 # Kernels
 from kernels.LOB import (
@@ -164,13 +168,20 @@ class CombinedKernel:
 # VPIN feature builder (from trades)
 # ============================================================================
 
-def build_vpin_features(trades_df, dollar_threshold=1_000_000, vpin_window=50):
-    """Build VPIN feature matrix: [VPIN, delta_VPIN, bar_vol, rel_volume]."""
+def build_vpin_features(trades_df, dollar_threshold=1_000_000, vpin_window=50,
+                        return_timestamps=False):
+    """Build VPIN feature matrix: [VPIN, delta_VPIN, bar_vol, rel_volume].
+
+    With return_timestamps=True also returns the epoch-second close time of
+    each bar, so features can be aligned by wall clock instead of row number.
+    """
     prices = trades_df["price"].values
     sizes = trades_df["size"].values.astype(float)
+    trade_ts = to_epoch_seconds(trades_df["ts_event"])
 
     # Dollar bars
     bars = []
+    bar_close_ts = []
     cum_dol = 0.0
     bar_prices, bar_sizes = [], []
     for i in range(len(prices)):
@@ -190,6 +201,7 @@ def build_vpin_features(trades_df, dollar_threshold=1_000_000, vpin_window=50):
                 "buy_volume": bs[np.diff(bp, prepend=bp[0]) >= 0].sum(),
                 "sell_volume": bs[np.diff(bp, prepend=bp[0]) < 0].sum(),
             })
+            bar_close_ts.append(trade_ts[i])
             cum_dol = 0.0
             bar_prices, bar_sizes = [], []
 
@@ -213,22 +225,30 @@ def build_vpin_features(trades_df, dollar_threshold=1_000_000, vpin_window=50):
     rel_vol = volumes / (np.mean(volumes) + 1e-8)
 
     features = np.column_stack([vpin, delta_vpin, bar_vol, rel_vol])
+    bar_ts = np.asarray(bar_close_ts, dtype=float)
     # Trim warmup
     features = features[vpin_window:]
+    bar_ts = bar_ts[vpin_window:]
 
     # Standardize
     mu, sigma = features.mean(axis=0), features.std(axis=0) + 1e-8
-    return (features - mu) / sigma
+    features = (features - mu) / sigma
+    return (features, bar_ts) if return_timestamps else features
 
 
 # ============================================================================
 # Kyle's Lambda feature builder
 # ============================================================================
 
-def build_kyle_features(trades_df, windows=(1, 5, 20)):
-    """Build Kyle's Lambda features: [lambda_1, lambda_5, lambda_20, residual_z]."""
+def build_kyle_features(trades_df, windows=(1, 5, 20), return_timestamps=False):
+    """Build Kyle's Lambda features: [lambda_1, lambda_5, lambda_20, residual_z].
+
+    Bins are fixed trade counts, so ~5,000 rows span the entire tape. Without
+    the returned timestamps these rows cannot be matched to any other kernel.
+    """
     prices = trades_df["price"].values.astype(float)
     sizes = trades_df["size"].values.astype(float)
+    trade_ts = to_epoch_seconds(trades_df["ts_event"])
     sides = trades_df["side"].values if "side" in trades_df.columns else None
 
     if sides is not None:
@@ -263,19 +283,30 @@ def build_kyle_features(trades_df, windows=(1, 5, 20)):
     residual_z = (residual - mu_r) / sig_r
 
     features = np.column_stack([lambdas[w] for w in windows] + [residual_z])
+    # Each bin closes on its last trade
+    bin_close_idx = np.minimum(np.arange(1, n_bins + 1) * bin_size - 1,
+                               len(trade_ts) - 1)
+    bin_ts = trade_ts[bin_close_idx]
     # Trim warmup
     features = features[max(windows):]
+    bin_ts = bin_ts[max(windows):]
 
     mu, sigma = features.mean(axis=0), features.std(axis=0) + 1e-8
-    return (features - mu) / sigma
+    features = (features - mu) / sigma
+    return (features, bin_ts) if return_timestamps else features
 
 
 # ============================================================================
 # VRP feature builder
 # ============================================================================
 
-def build_vrp_features(daily_ohlcv, vix_df=None, pcr_df=None):
-    """Build VRP features: [vrp, term_struct, sin/cos_doy/dow, mom_5/21, log_vix, log_pcr]."""
+def build_vrp_features(daily_ohlcv, vix_df=None, pcr_df=None, return_dates=False):
+    """Build VRP features: [vrp, term_struct, sin/cos_doy/dow, mom_5/21, log_vix, log_pcr].
+
+    Trims 30 warm-up days off the front, so the returned rows start at
+    daily_ohlcv.index[30] — return_dates hands back that index rather than
+    leaving callers to assume row 0 is day 0.
+    """
     close = daily_ohlcv["close"].values.astype(float)
     log_ret = np.diff(np.log(close), prepend=np.log(close[0]))
 
@@ -331,15 +362,20 @@ def build_vrp_features(daily_ohlcv, vix_df=None, pcr_df=None):
     # Trim warmup
     features = features[30:]
     mu, sigma = features.mean(axis=0), features.std(axis=0) + 1e-8
-    return (features - mu) / sigma
+    features = (features - mu) / sigma
+    return (features, daily_ohlcv.index[30:]) if return_dates else features
 
 
 # ============================================================================
 # MacroMotion feature builder
 # ============================================================================
 
-def build_macro_features(daily_ohlcv, spy_df=None, xle_df=None):
-    """Build MacroMotion features: [x_5d, x_20d, x_60d, rho_spy, rho_xle, sigma_eps]."""
+def build_macro_features(daily_ohlcv, spy_df=None, xle_df=None, return_dates=False):
+    """Build MacroMotion features: [x_5d, x_20d, x_60d, rho_spy, rho_xle, sigma_eps].
+
+    Trims 60 warm-up days off the front. Pass date-aligned spy_df/xle_df —
+    this builder indexes them positionally against daily_ohlcv.
+    """
     close = daily_ohlcv["close"].values.astype(float)
     log_ret = np.diff(np.log(close), prepend=np.log(close[0]))
     n = len(close)
@@ -408,21 +444,26 @@ def build_macro_features(daily_ohlcv, spy_df=None, xle_df=None):
     features = np.column_stack([x_5, x_20, x_60, rho_spy, rho_xle, sigma_eps])
     features = features[60:]
     mu, sigma = features.mean(axis=0), features.std(axis=0) + 1e-8
-    return (features - mu) / sigma
+    features = (features - mu) / sigma
+    return (features, daily_ohlcv.index[60:]) if return_dates else features
 
 
 # ============================================================================
 # Hawkes proxy feature builder
 # ============================================================================
 
-def build_hawkes_features(trades_df, window_seconds=300):
+def build_hawkes_features(trades_df, window_seconds=300, return_timestamps=False):
     """
     Build Hawkes proxy features: [event_count, mean_inter_arrival, burst_ratio].
     Vectorized — no Python loops over 36M rows.
+
+    Windows are fixed wall-clock spans, so the row count depends on calendar
+    length rather than on trade activity. return_timestamps gives the close
+    time of each window (the instant its features become knowable).
     """
-    ts = pd.to_datetime(trades_df["ts_event"], utc=True)
-    epoch = (ts.astype(np.int64) / 1e9).values
-    epoch = epoch - epoch[0]  # zero-base
+    epoch_abs = to_epoch_seconds(trades_df["ts_event"])
+    epoch0 = float(epoch_abs[0])
+    epoch = epoch_abs - epoch0  # zero-base
     total_time = epoch[-1]
 
     bins = np.arange(0, total_time + window_seconds, window_seconds)
@@ -449,8 +490,12 @@ def build_hawkes_features(trades_df, window_seconds=300):
                       out=np.zeros(n_windows), where=counts > 1)
 
     features = np.column_stack([counts.astype(float), mean_ia, burst])
+    # A window's features are only known at its right edge
+    window_close_ts = epoch0 + bins[1:n_windows + 1]
+
     mu, sigma = features.mean(axis=0), features.std(axis=0) + 1e-8
-    return (features - mu) / sigma
+    features = (features - mu) / sigma
+    return (features, window_close_ts) if return_timestamps else features
 
 
 # ============================================================================
@@ -564,7 +609,7 @@ def build_gamma_exposure_features(options_df):
 # ============================================================================
 
 def build_vanna_charm_features_real(greeks_bars_df, trades_df, dollar_threshold=1_000_000,
-                                    zscore_window=50):
+                                    zscore_window=50, return_timestamps=False):
     """
     Build VannaCharm features in dollar-bar time from pre-computed Greeks.
     Input: greeks_bars_df with columns [bar_close_time, net_vanna, net_charm].
@@ -589,6 +634,7 @@ def build_vanna_charm_features_real(greeks_bars_df, trades_df, dollar_threshold=
     # Build dollar bars from trades to get bar timestamps
     ts = pd.to_datetime(trades_df["ts_event"], utc=True)
     ts_unix = ts.values.astype(np.int64)
+    ts_seconds = to_epoch_seconds(trades_df["ts_event"])
     prices = trades_df["price"].values.astype(float)
     sizes = trades_df["size"].values.astype(float)
 
@@ -638,6 +684,9 @@ def build_vanna_charm_features_real(greeks_bars_df, trades_df, dollar_threshold=
         sigma = window.std(axis=0) + 1e-8
         normed[i] = (features[i] - mu) / sigma
 
+    if return_timestamps:
+        bar_ts = ts_seconds[np.clip(bar_boundaries, 0, len(ts_seconds) - 1)]
+        return normed, bar_ts
     return normed
 
 
@@ -691,6 +740,23 @@ def build_vanna_charm_features(options_df, trades_df, dollar_threshold=1_000_000
 # Main
 # ============================================================================
 
+def _assert_on_master(arrays, names, n_master):
+    """
+    All fast features must already sit on the master schedule.
+
+    The original pipeline aligned kernels with arr[:n] here, which silently
+    matched rows from different months. Alignment now happens once, by wall
+    clock, in section 3b2 — so anything reaching this point with the wrong
+    length is a bug, not something to trim away.
+    """
+    bad = [(nm, a.shape[0]) for nm, a in zip(names, arrays) if a.shape[0] != n_master]
+    if bad:
+        raise ValueError(
+            f"Fast features are not on the master schedule (expected "
+            f"{n_master} rows): {bad}. Do not trim — fix the alignment."
+        )
+
+
 def main():
     t0 = time.time()
     print("=" * 70)
@@ -721,6 +787,7 @@ def main():
     # ── 2. Build LOB features (fast — precomputed) ───────────────────────
     print("\n[2/7] Building LOB features from precomputed data...")
     lob_feat_list = []
+    lob_ts_list = []
     lob_dates_used = []
     for d in dates:
         try:
@@ -728,18 +795,23 @@ def main():
             vp = feat.get("volume_profile")
             bs = feat.get("book_shape")
             di = feat.get("depth_imbalance")
-            if vp is not None and bs is not None and di is not None:
+            ts = feat.get("timestamps")
+            if vp is not None and bs is not None and di is not None and ts is not None:
                 # Concatenate all 3 sub-kernel features per bar
-                n_bars = min(vp.shape[0], bs.shape[0], di.shape[0])
+                n_bars = min(vp.shape[0], bs.shape[0], di.shape[0], len(ts))
                 combined = np.concatenate([
                     vp[:n_bars], bs[:n_bars], di[:n_bars]
                 ], axis=1)
                 lob_feat_list.append(combined)
+                lob_ts_list.append(np.asarray(ts)[:n_bars])
                 lob_dates_used.append(d)
         except Exception:
             continue
 
     lob_features_all = np.concatenate(lob_feat_list, axis=0)
+    # Snapshot counts vary from 14 to a few thousand per day, so row number
+    # says nothing about when a row happened — keep the wall clock.
+    lob_ts_all = to_epoch_seconds(np.concatenate(lob_ts_list))
     print(f"  LOB feature matrix: {lob_features_all.shape} "
           f"({len(lob_dates_used)} days)")
 
@@ -749,13 +821,25 @@ def main():
     n_trades = len(trades)
     print(f"  Trades loaded: {n_trades:,}")
 
-    vpin_feats = build_vpin_features(trades, dollar_threshold=1_000_000)
+    # The master dollar-bar schedule is the single definition of "bar i" for
+    # the whole pipeline: every fast kernel is resampled onto it and the
+    # forward-return target is computed from its closes.
+    master = build_master_bar_schedule(trades, dollar_threshold=1_000_000)
+    master_ts = master["close_ts"]
+    master_px = master["close_price"]
+    print(f"  Master dollar-bar schedule: {len(master_ts):,} bars "
+          f"({pd.to_datetime(master_ts[0], unit='s', utc=True):%Y-%m-%d} → "
+          f"{pd.to_datetime(master_ts[-1], unit='s', utc=True):%Y-%m-%d})")
+
+    vpin_feats, vpin_ts = build_vpin_features(
+        trades, dollar_threshold=1_000_000, return_timestamps=True)
     print(f"  VPIN features: {vpin_feats.shape}")
 
-    kyle_feats = build_kyle_features(trades)
+    kyle_feats, kyle_ts = build_kyle_features(trades, return_timestamps=True)
     print(f"  Kyle features: {kyle_feats.shape}")
 
-    hawkes_feats = build_hawkes_features(trades, window_seconds=300)
+    hawkes_feats, hawkes_ts = build_hawkes_features(
+        trades, window_seconds=300, return_timestamps=True)
     print(f"  Hawkes features: {hawkes_feats.shape}")
 
     # ── 3b. VannaCharm (real Greeks) + GammaExposure ─────────────────────
@@ -763,16 +847,53 @@ def main():
     greeks_bars_path = os.path.join(_ROOT, "data", "vanna_charm_bars.parquet")
     if os.path.exists(greeks_bars_path) and "VannaCharm" not in skip_kernels:
         greeks_bars_df = pd.read_parquet(greeks_bars_path)
-        vc_feats = build_vanna_charm_features_real(
-            greeks_bars_df, trades, dollar_threshold=1_000_000
+        vc_feats, vc_ts = build_vanna_charm_features_real(
+            greeks_bars_df, trades, dollar_threshold=1_000_000,
+            return_timestamps=True
         )
         print(f"  VannaCharm features (real Greeks): {vc_feats.shape}")
     else:
         vc_feats = None
+        vc_ts = None
         print("  VannaCharm: skipped")
 
     # GammaExposure — still waiting on gamma data from Anders
     gex_feats = None
+
+    # ── 3b2. Align every fast kernel onto the master schedule ────────────
+    # Each fast kernel is sampled on its own clock: LOB per snapshot, VPIN
+    # and VannaCharm per dollar bar, Kyle per fixed trade-count bin, Hawkes
+    # per 300s wall-clock window. The old code aligned them with arr[:n_fast],
+    # which lined up row i of each regardless of when row i happened — LOB
+    # row 4,000 was July 2023 while Kyle row 4,000 was late 2024. Resample
+    # everything onto one schedule by wall clock instead, using a backward
+    # as-of join so nothing looks forward.
+    print("\n[3b2] Aligning fast kernels to the master dollar-bar schedule...")
+    _named_fast = {
+        "LOB": (lob_ts_all, lob_features_all),
+        "VPIN": (vpin_ts, vpin_feats),
+        "Kyle": (kyle_ts, kyle_feats),
+        "Hawkes": (hawkes_ts, hawkes_feats),
+    }
+    if vc_feats is not None:
+        _named_fast["VannaCharm"] = (vc_ts, vc_feats)
+
+    _aligned, _valid = align_fast_features(_named_fast, master_ts)
+    _start = first_valid_bar(_valid)
+
+    master_ts = master_ts[_start:]
+    master_px = master_px[_start:]
+    lob_features_all = _aligned["LOB"][_start:]
+    vpin_feats = _aligned["VPIN"][_start:]
+    kyle_feats = _aligned["Kyle"][_start:]
+    hawkes_feats = _aligned["Hawkes"][_start:]
+    if vc_feats is not None:
+        vc_feats = _aligned["VannaCharm"][_start:]
+
+    n_master = len(master_ts)
+    print(f"  Dropped {_start:,} warm-up bars; {n_master:,} aligned bars "
+          f"({pd.to_datetime(master_ts[0], unit='s', utc=True):%Y-%m-%d} → "
+          f"{pd.to_datetime(master_ts[-1], unit='s', utc=True):%Y-%m-%d})")
 
     # ── 3c. v2 Architecture: Consolidate order-flow into single kernel ───
     ARCH_VERSION = os.environ.get("ARCH_VERSION", "v1").lower()
@@ -786,13 +907,16 @@ def main():
     if ARCH_VERSION == "v2":
         print(f"\n[3c] v2 Architecture: consolidating order-flow kernels...")
 
-        # Trim all order-flow arrays to common length
-        of_n = min(lob_features_all.shape[0], vpin_feats.shape[0],
-                   kyle_feats.shape[0], hawkes_feats.shape[0])
-        of_lob = lob_features_all[:of_n]
-        of_vpin = vpin_feats[:of_n]
-        of_kyle = kyle_feats[:of_n]
-        of_hawkes = hawkes_feats[:of_n]
+        # Already aligned to the master schedule in 3b2 — verify, never trim
+        _assert_on_master(
+            [lob_features_all, vpin_feats, kyle_feats, hawkes_feats],
+            ["LOB", "VPIN", "Kyle", "Hawkes"], n_master,
+        )
+        of_n = n_master
+        of_lob = lob_features_all
+        of_vpin = vpin_feats
+        of_kyle = kyle_feats
+        of_hawkes = hawkes_feats
 
         # Save raw features for position-sizing gates before PCA
         gate_vpin = of_vpin[:, 0]       # VPIN level
@@ -835,10 +959,22 @@ def main():
 
     # ── 4. Build slow + event features (daily) ──────────────────────────
     print("\n[4/8] Building slow kernel features (VRP + MacroMotion + Sentiment + EventProximity)...")
-    vrp_feats = build_vrp_features(daily, vix_df, pcr_df)
+    # VIX/SPY/XLE cover 378 US equity sessions; CL trades 468 days over the
+    # same span. The builders index them positionally, so join them onto the
+    # CL calendar first — otherwise the length check silently fails and VRP
+    # falls back to a placeholder while Macro correlates against zero-padding.
+    vix_al = reindex_daily(vix_df, daily.index)
+    spy_al = reindex_daily(spy_df, daily.index)
+    xle_al = reindex_daily(xle_df, daily.index)
+    pcr_al = reindex_daily(pcr_df, daily.index)
+    print(f"  External data joined to CL calendar: {len(daily)} days")
+
+    vrp_feats, vrp_dates = build_vrp_features(daily, vix_al, pcr_al,
+                                              return_dates=True)
     print(f"  VRP features: {vrp_feats.shape}")
 
-    macro_feats = build_macro_features(daily, spy_df, xle_df)
+    macro_feats, macro_dates = build_macro_features(daily, spy_al, xle_al,
+                                                    return_dates=True)
     print(f"  Macro features: {macro_feats.shape}")
 
     # Sentiment kernel (daily embeddings from GDELT/FinBERT)
@@ -897,6 +1033,64 @@ def main():
         event_feats = None
         print("  Event calendar not found — skipping EventProximity")
 
+    # ── 4b. Put the slow layer on one common daily axis ──────────────────
+    # VRP trims 30 warm-up days, Macro trims 60, and Sentiment carries its
+    # own date index (503 rows against CL's 468 days). The old code stacked
+    # them with [:n_slow], which lined up VRP day 30 with Macro day 60 with
+    # Sentiment day 0, and left the daily grid ending 70 days short of the
+    # bars. That short grid is what clipped every OOS bar onto one day and
+    # made the forward-return target identically zero. Align by date.
+    print("\n[4b] Aligning slow kernels to a common daily axis...")
+    _named_slow = {
+        "VRP": (to_epoch_seconds(vrp_dates), vrp_feats),
+        "Macro": (to_epoch_seconds(macro_dates), macro_feats),
+    }
+    if sent_feats is not None:
+        _named_slow["Sentiment"] = (to_epoch_seconds(sent_dates), sent_feats)
+
+    _daily_ts_full = to_epoch_seconds(daily.index)
+    _aligned_slow, _valid_slow = align_fast_features(_named_slow, _daily_ts_full)
+    _slow_start = first_valid_bar(_valid_slow)
+
+    vrp_feats = _aligned_slow["VRP"][_slow_start:]
+    macro_feats = _aligned_slow["Macro"][_slow_start:]
+    if sent_feats is not None:
+        sent_feats = _aligned_slow["Sentiment"][_slow_start:]
+    if event_feats is not None:
+        event_feats = event_feats[_slow_start:]
+
+    daily = daily.iloc[_slow_start:]
+    slow_dates = daily.index
+    n_slow_axis = len(slow_dates)
+    print(f"  Slow axis: {n_slow_axis} days "
+          f"({slow_dates[0]:%Y-%m-%d} → {slow_dates[-1]:%Y-%m-%d}), "
+          f"dropped {_slow_start} warm-up days")
+
+    # Bars earlier than the slow layer's first day have no daily context and
+    # would all clip onto day 0 — drop them from the fast side too.
+    _slow_t0 = _daily_ts_full[_slow_start]
+    _bar_keep = int(np.searchsorted(master_ts, _slow_t0, side="left"))
+    if _bar_keep:
+        master_ts = master_ts[_bar_keep:]
+        master_px = master_px[_bar_keep:]
+        lob_features_all = lob_features_all[_bar_keep:]
+        vpin_feats = vpin_feats[_bar_keep:]
+        kyle_feats = kyle_feats[_bar_keep:]
+        hawkes_feats = hawkes_feats[_bar_keep:]
+        if vc_feats is not None:
+            vc_feats = vc_feats[_bar_keep:]
+        if orderflow_feats is not None:
+            orderflow_feats = orderflow_feats[_bar_keep:]
+        if gate_vpin is not None:
+            gate_vpin = gate_vpin[_bar_keep:]
+            gate_hawkes = gate_hawkes[_bar_keep:]
+            gate_kyle = gate_kyle[_bar_keep:]
+        n_master = len(master_ts)
+    print(f"  Fast side trimmed to the slow window: {n_master:,} bars "
+          f"({pd.to_datetime(master_ts[0], unit='s', utc=True):%Y-%m-%d} → "
+          f"{pd.to_datetime(master_ts[-1], unit='s', utc=True):%Y-%m-%d}), "
+          f"dropped {_bar_keep:,} bars")
+
     # ── 5. Align resolutions + build combiner ────────────────────────────
     print(f"\n[5/8] Aligning resolutions and building kernel combiner... "
           f"(arch={ARCH_VERSION})")
@@ -909,8 +1103,9 @@ def main():
             fast_arrays.append(vc_feats)
             fast_names_all.append("VannaCharm")
 
-        n_fast = min(a.shape[0] for a in fast_arrays)
-        fast_trimmed = {name: arr[:n_fast] for name, arr in zip(fast_names_all, fast_arrays)}
+        _assert_on_master(fast_arrays, fast_names_all, n_master)
+        n_fast = n_master
+        fast_trimmed = dict(zip(fast_names_all, fast_arrays))
 
         # Trim gate signals to match
         if gate_vpin is not None:
@@ -918,14 +1113,15 @@ def main():
             gate_hawkes = gate_hawkes[:n_fast]
             gate_kyle = gate_kyle[:n_fast]
 
-        n_slow_arrays = [vrp_feats, macro_feats]
-        if sent_feats is not None:
-            n_slow_arrays.append(sent_feats)
-        n_slow = min(a.shape[0] for a in n_slow_arrays)
+        n_slow = n_slow_axis
+        _slow_names = ["VRP", "Macro"] + (["Sentiment"] if sent_feats is not None else [])
+        _slow_arrays = [vrp_feats, macro_feats] + \
+                       ([sent_feats] if sent_feats is not None else [])
+        _assert_on_master(_slow_arrays, _slow_names, n_slow)
 
-        vrp_slow = vrp_feats[:n_slow]
-        macro_slow = macro_feats[:n_slow]
-        sent_slow = sent_feats[:n_slow] if sent_feats is not None else None
+        vrp_slow = vrp_feats
+        macro_slow = macro_feats
+        sent_slow = sent_feats
 
         print(f"  Fast bars: {n_fast}")
         print(f"  Slow days: {n_slow}")
@@ -1030,25 +1226,27 @@ def main():
             fast_arrays.append(gex_feats_expanded)
             fast_names_all.append("GammaExposure")
 
-        n_fast = min(a.shape[0] for a in fast_arrays)
+        _assert_on_master(fast_arrays, fast_names_all, n_master)
+        n_fast = n_master
 
         print(f"  Fast bars: {n_fast}")
 
-        fast_trimmed = {name: arr[:n_fast] for name, arr in zip(fast_names_all, fast_arrays)}
+        fast_trimmed = dict(zip(fast_names_all, fast_arrays))
 
         lob_fast = fast_trimmed["LOB"]
         vpin_fast = fast_trimmed["VPIN"]
         kyle_fast = fast_trimmed["Kyle"]
         hawkes_fast = fast_trimmed["Hawkes"]
 
-        n_slow_arrays = [vrp_feats, macro_feats]
-        if sent_feats is not None:
-            n_slow_arrays.append(sent_feats)
-        n_slow = min(a.shape[0] for a in n_slow_arrays)
+        n_slow = n_slow_axis
+        _slow_names = ["VRP", "Macro"] + (["Sentiment"] if sent_feats is not None else [])
+        _slow_arrays = [vrp_feats, macro_feats] + \
+                       ([sent_feats] if sent_feats is not None else [])
+        _assert_on_master(_slow_arrays, _slow_names, n_slow)
 
-        vrp_slow = vrp_feats[:n_slow]
-        macro_slow = macro_feats[:n_slow]
-        sent_slow = sent_feats[:n_slow] if sent_feats is not None else None
+        vrp_slow = vrp_feats
+        macro_slow = macro_feats
+        sent_slow = sent_feats
 
         print(f"  Slow days: {n_slow}")
         print(f"  Fast kernels available: {fast_names_all}")
@@ -1182,8 +1380,8 @@ def main():
         event_scores_norm = 0.5 + 0.5 * (event_scores - e_min) / (e_max - e_min + 1e-8)
 
         def event_gate_fn(bar_idx):
-            # Map bar to daily index
-            daily_idx = min(int(bar_idx * n_slow / n_fast), n_slow - 1)
+            # Map bar to daily index by wall clock (aligner is built below)
+            daily_idx = int(aligner.get_daily_indices(np.asarray(bar_idx)))
             if daily_idx < len(event_scores_norm):
                 return float(event_scores_norm[daily_idx])
             return 1.0
@@ -1193,12 +1391,30 @@ def main():
     # Build targets: forward 1-bar log returns
     daily_close = daily["close"].values.astype(float)
 
-    # Map bar indices → daily indices for alignment
-    bars_per_day = n_fast // len(lob_dates_used)
-    bar_timestamps = np.arange(n_fast, dtype=float)
-    daily_timestamps = np.arange(0, n_fast, bars_per_day, dtype=float)[:n_slow]
+    # Map bar indices → daily indices by wall clock.
+    #
+    # The old code built a synthetic daily grid, np.arange(0, n_fast,
+    # bars_per_day)[:n_slow], which spanned only n_slow * bars_per_day bars.
+    # Every bar past that point clipped to the final day, so the entire OOS
+    # window shared one price and the forward-return target was identically
+    # zero. Use the actual bar close times and daily dates instead, and
+    # assert the daily grid really covers the bars.
+    bar_timestamps = master_ts
+    daily_timestamps = to_epoch_seconds(daily.index[:n_slow])
+
+    if daily_timestamps[-1] < bar_timestamps[-1] - 5 * 86400.0:
+        raise ValueError(
+            f"Daily grid ends "
+            f"{pd.to_datetime(daily_timestamps[-1], unit='s', utc=True):%Y-%m-%d} "
+            f"but bars run to "
+            f"{pd.to_datetime(bar_timestamps[-1], unit='s', utc=True):%Y-%m-%d} — "
+            f"trailing bars would clip to the last day."
+        )
 
     aligner = MultiResolutionAligner(bar_timestamps, daily_timestamps)
+    _bar_day = aligner.get_daily_indices(np.arange(n_fast))
+    print(f"  Bar→day mapping: {_bar_day.min()}..{_bar_day.max()} over "
+          f"{n_slow} days, {len(np.unique(_bar_day))} distinct days covered")
 
     # Momentum gate
     print("\n  Fitting MomentumGate (Arjan)...")
@@ -1263,7 +1479,10 @@ def main():
     VOL_WINDOW = int(os.environ.get("VOL_WINDOW", "20"))
 
     bar_daily_idx = aligner.get_daily_indices(np.arange(n_fast))
-    bar_prices = cl_daily[np.clip(bar_daily_idx, 0, len(cl_daily) - 1)]
+    # Forward returns come from the master dollar-bar closes. Mapping daily
+    # closes down onto bars made the target ~95% zeros even once the mapping
+    # was correct, because many bars share a single day.
+    bar_prices = master_px
 
     if TARGET_MODE == "vol":
         # ── Predict forward realized volatility ──
@@ -1315,12 +1534,17 @@ def main():
             y = y[1:]  # shift for forward return
             y = np.append(y, 0)  # pad last
         else:
-            log_p = np.log(cl_daily + 1e-8)
-            fwd_daily = np.zeros(len(cl_daily))
-            for i in range(len(cl_daily)):
-                j = min(i + FORWARD_HORIZON, len(cl_daily) - 1)
-                fwd_daily[i] = log_p[j] - log_p[i]
-            y = fwd_daily[np.clip(bar_daily_idx, 0, len(fwd_daily) - 1)]
+            # Horizon stays in days, but is measured on the bar clock so the
+            # target varies bar to bar instead of being a daily step function.
+            log_p = np.log(bar_prices + 1e-8)
+            j = np.searchsorted(bar_timestamps,
+                                bar_timestamps + FORWARD_HORIZON * 86400.0,
+                                side="left")
+            j = np.clip(j, 0, n_fast - 1)
+            y = log_p[j] - log_p
+
+    print("\n  Target sanity check:")
+    check_target_not_degenerate(y, label=f"{TARGET_MODE} target (full sample)")
 
     engine = PurgedWalkForward(
         n_splits=8,
@@ -1385,8 +1609,9 @@ def main():
     if sent_kernel is not None:
         slow_fmaps.append(sent_kernel.feature_map(sent_slow))
 
-    # Align slow to fast resolution via nearest-index mapping
-    slow_to_fast_idx = np.linspace(0, n_slow - 1, n_fast).astype(int)
+    # Align slow to fast resolution by wall clock, not by stretching the
+    # daily axis evenly across the bar axis (bars are not uniform in time)
+    slow_to_fast_idx = np.clip(bar_daily_idx, 0, n_slow - 1)
     slow_fmaps_aligned = []
     for phi_s in slow_fmaps:
         slow_fmaps_aligned.append(phi_s[slow_to_fast_idx])
@@ -1494,6 +1719,12 @@ def main():
 
     # Collect per-kernel OOS predictions using same fold structure
     splits = engine.split_indices(n_fast)
+
+    # Every fold's test window must carry a live target. A silently
+    # degenerate OOS target is what produced the original Sharpe 1.56.
+    print("\n  Per-fold OOS target check:")
+    for _fi, (_tr, _te) in enumerate(splits):
+        check_target_not_degenerate(y, _te, label=f"fold {_fi + 1} OOS")
     per_kernel_oos = {i: [] for i in range(n_kernels)}
     two_stage_y_true = []
     two_stage_oos_idx = []
@@ -1511,10 +1742,7 @@ def main():
                 d_train = data[train_idx]
                 d_test = data[test_idx]
             else:
-                slow_to_fast = np.clip(
-                    np.linspace(0, data.shape[0] - 1, n_fast).astype(int),
-                    0, data.shape[0] - 1,
-                )
+                slow_to_fast = np.clip(bar_daily_idx, 0, data.shape[0] - 1)
                 d_train = data[slow_to_fast[train_idx]]
                 d_test = data[slow_to_fast[test_idx]]
 
@@ -1981,7 +2209,11 @@ def main():
 
     # Apply warm-up: zero out positions for first WARMUP_DAYS
     if WARMUP_DAYS > 0:
-        warmup_bars = int(WARMUP_DAYS * (n_fast / n_slow))
+        # Count real days on the OOS bars, not an average bars-per-day ratio
+        _wu_bars = np.asarray(result.oos_indices)[:len(positions)]
+        _wu_days = np.clip(aligner.get_daily_indices(_wu_bars), 0, n_slow - 1)
+        _day0 = int(_wu_days[0]) if len(_wu_days) else 0
+        warmup_bars = int(np.searchsorted(_wu_days, _day0 + WARMUP_DAYS, side="left"))
         warmup_bars = min(warmup_bars, len(positions))
         positions[:warmup_bars] = 0
         print(f"  Warm-up filter: flat for first {WARMUP_DAYS} days "
@@ -2062,8 +2294,16 @@ def main():
 
     # Map each bar to its daily index
     n_oos = len(positions)
+    # Use each OOS bar's actual day. The old np.linspace spread the OOS bars
+    # evenly across *all* n_slow days, so out-of-sample positions were scored
+    # against in-sample dates.
+    _oos_bar_idx = np.asarray(result.oos_indices)[:n_oos]
+    if len(_oos_bar_idx) != n_oos:
+        raise ValueError(
+            f"OOS index/position length mismatch: {len(_oos_bar_idx)} vs {n_oos}"
+        )
     oos_bar_daily_idx = np.clip(
-        np.linspace(0, n_slow - 1, n_oos).astype(int), 0, n_slow - 1
+        aligner.get_daily_indices(_oos_bar_idx), 0, n_slow - 1
     )
 
     # Take end-of-day position (last bar of each day)
