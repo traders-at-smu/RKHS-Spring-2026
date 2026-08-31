@@ -1,3 +1,13 @@
+!!! PARTIALLY INVALID — READ POSTMORTEM.md FIRST !!!
+================================================================================
+The architecture and file layout below are current. Every performance number
+is not: they came from a pipeline with four time-alignment bugs and a
+full-sample z-score leak.
+
+The "NULL TEST RESULT" and "BEST RESULT" sections further down are corrected
+in place. Everything else numeric should be re-measured before it is quoted.
+================================================================================
+
 
 Pristine-RKHS/
 │
@@ -9,6 +19,14 @@ Pristine-RKHS/
 ├── fetch_external_data.py       Pulls VIX, SPY, XLE, put/call, event calendar
 ├── generate_charts.py           Generates all Midnight Ocean charts from results
 ├── stress_test_run.py           Runs 6 stress scenarios on backtest results
+├── feature_alignment.py         Master dollar-bar schedule, wall-clock as-of
+│                                joins, causal expanding_zscore
+├── validate_pipeline.py         Falsification suite (noise / shuffle-time /
+│                                shuffle-target controls across seeds)
+├── results_io.py                Results discovery that will not hand a
+│                                falsification control run to a report
+├── POSTMORTEM.md                What was broken and what it invalidated
+├── HANDOFF.md                   State of play + multi-asset project brief
 │
 ├── kernels/                     10 RKHS kernel layers (from SMUAmeen/RKHS_Revised)
 │   ├── __init__.py
@@ -56,7 +74,10 @@ Pristine-RKHS/
 │   └── charts.py                8 charts: equity+drawdown, pred vs actual, return dist,
 │                                rolling Sharpe, MC fan, kernel weights, scorecard, stress test
 │
-├── figures/                     Generated charts (Midnight Ocean theme)
+├── figures/                     Generated charts — NOT tracked in git, and
+│                                deleted in the alignment fix because every
+│                                chart came from the pre-fix pipeline.
+│                                Regenerate with generate_charts.py.
 │   ├── bt_01_equity_*.png           Cumulative P&L + drawdown
 │   ├── bt_02_pred_vs_actual_*.png   OOS predictions scatter (corr annotation)
 │   ├── bt_03_return_dist_*.png      Strategy return histogram (skew/kurt)
@@ -188,20 +209,30 @@ KERNEL STATUS
   BLOCKED (1):
     SentimentAnalysis — needs news API from Anders' team
 
-  NULL TEST RESULT:
-    Kernels confirmed contributing — null test (no kernels) produces
-    Sharpe -0.76 vs +1.55 with kernels. The kernels act as a noise
-    filter, not a return predictor.
+  NULL TEST RESULT (corrected — the old claim here was wrong):
+    The previous entry read "kernels confirmed contributing — null test
+    produces Sharpe -0.76 vs +1.55 with kernels". That was measured on the
+    buggy pipeline and is withdrawn.
+
+    Re-measured properly with validate_pipeline.py, across seeds 0/1/2:
+
+      real features        Sharpe  0.28 +/- 1.18
+      features -> noise    Sharpe  1.18 +/- 1.25
+      shuffled in time     Sharpe -0.73 +/- 1.12
+      shuffled TARGET      Sharpe  1.15 +/- 1.08
+
+    Random features do as well as the real ones, and a target that cannot
+    be predicted by construction scores better than either. The kernels are
+    not distinguishable from noise on CL, and the Sharpe itself carries no
+    information about predictive skill.
 
 
 ================================================================================
-BEST RESULT (Run 13)
+BEST RESULT (Run 13) — WITHDRAWN
 ================================================================================
 
-  Sharpe:       1.55        Sortino:      2.76
-  Max DD:       8.1%        Total P&L:    +32.8%
-  Hit Rate:     54.7%       W/L Ratio:    1.46x
-  Deflated SR:  0.97        Trades:       30
-  Days Active:  86/407 (21.1%)
-  Transaction costs included (1-tick per trade)
-  Survives all 6 stress scenarios (worst: GFC at -15% DD)
+  The numbers that stood here (Sharpe 1.55, Sortino 2.76, Deflated SR 0.97)
+  were produced by the pre-fix pipeline. On the fixed pipeline this metric
+  does not separate the real strategy from a shuffled-target control, so
+  there is no "best result" to report and no basis for ranking one run
+  above another. See POSTMORTEM.md.

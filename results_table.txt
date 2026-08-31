@@ -88,7 +88,12 @@ Phase 2 — Two-Stage ElasticNet (Runs 7-9):
 Phase 3 — Kalman Filter (Runs 10-13):
   - Auto-tuned Q was too conservative (Run 10)
   - Aggressive Q was the performance unlock (Run 11)
-  - Null test confirmed kernels drive the entire edge: Sharpe 1.55 with vs -1.01 without (Run 12 vs 13)
+  - [WITHDRAWN] "Null test confirmed kernels drive the entire edge: Sharpe 1.55 with vs
+    -1.01 without (Run 12 vs 13)". Re-measured on the fixed pipeline with
+    validate_pipeline.py across seeds 0/1/2: real features 0.28 +/- 1.18, features
+    replaced by pure noise 1.18 +/- 1.25, target shuffled 1.15 +/- 1.08. The kernels
+    are not distinguishable from noise, and a target that cannot be predicted by
+    construction scores better than the real one. See POSTMORTEM.md.
   - Lower thresholds + transaction costs = best overall config (Run 13)
 
 Phase 4 — Hyperparameter Tuning (Runs 14-15):
