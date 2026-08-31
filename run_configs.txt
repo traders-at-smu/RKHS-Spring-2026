@@ -1,7 +1,10 @@
 !!! INVALID — SUPERSEDED BY THE ALIGNMENT FIX (see POSTMORTEM.md) !!!
 The results recorded against these configs came from a pipeline with four
-time-alignment bugs. The configs themselves are still valid to run; the
-numbers attached to them are not.
+time-alignment bugs and a full-sample z-score leak. The configs themselves
+are still valid to run; the numbers attached to them are not.
+
+run_mkl_optimize.py was removed — it still contained the alignment bugs
+verbatim, so any config referencing it cannot be reproduced.
 
 RKHS Pipeline — Reproducible Run Configurations
 =================================================

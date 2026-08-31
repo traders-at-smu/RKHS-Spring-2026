@@ -12,6 +12,8 @@ import numpy as np
 import pandas as pd
 
 from feature_alignment import (
+    expanding_zscore,
+    expanding_mean,
     to_epoch_seconds,
     build_master_bar_schedule,
     align_to_schedule,
@@ -176,6 +178,60 @@ def test_first_valid_bar_rejects_holes():
     except ValueError:
         return
     raise AssertionError("a hole in the middle of the mask was not caught")
+
+
+# ── causal normalisation ────────────────────────────────────────────────
+
+def test_expanding_zscore_never_looks_forward():
+    """
+    The property that matters: truncating the input must not change any
+    output that came before the cut. A full-sample z-score fails this.
+    """
+    x = np.random.default_rng(4).normal(5, 2, (1_000, 3))
+    full = expanding_zscore(x)
+    for cut in (50, 200, 700):
+        np.testing.assert_allclose(full[:cut], expanding_zscore(x[:cut]))
+
+
+def test_full_sample_zscore_would_fail_that_property():
+    """Guard the guard — show the old formula really is detectable."""
+    x = np.random.default_rng(5).normal(5, 2, (1_000, 1))
+
+    def old(a):
+        mu, sigma = a.mean(axis=0), a.std(axis=0) + 1e-8
+        return (a - mu) / sigma
+
+    assert not np.allclose(old(x)[:200], old(x[:200])), \
+        "full-sample z-score should have been contaminated by the tail"
+
+
+def test_expanding_zscore_matches_a_naive_loop():
+    x = np.random.default_rng(6).normal(0, 1, (200, 2))
+    got = expanding_zscore(x, min_periods=1)
+    for i in range(1, 200):
+        w = x[:i + 1]
+        want = (x[i] - w.mean(axis=0)) / (w.std(axis=0) + 1e-8)
+        np.testing.assert_allclose(got[i], want, atol=1e-6, rtol=1e-6)
+
+
+def test_expanding_zscore_zeroes_the_warmup_and_stays_finite():
+    x = np.random.default_rng(7).normal(0, 1, (100, 2))
+    z = expanding_zscore(x, min_periods=20)
+    assert np.all(z[:20] == 0.0)
+    assert np.isfinite(z).all()
+
+
+def test_expanding_zscore_survives_a_constant_column():
+    x = np.column_stack([np.ones(100), np.arange(100.0)])
+    z = expanding_zscore(x, min_periods=5)
+    assert np.isfinite(z).all()
+    assert np.allclose(z[:, 0], 0.0)
+
+
+def test_expanding_mean_is_causal():
+    x = np.arange(1.0, 11.0)
+    np.testing.assert_allclose(expanding_mean(x),
+                               np.cumsum(x) / np.arange(1, 11))
 
 
 # ── target guard ────────────────────────────────────────────────────────

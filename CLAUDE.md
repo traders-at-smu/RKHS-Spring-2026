@@ -5,12 +5,17 @@ multi-kernel RKHS strategy on CL (crude oil) futures, Jul 2023 – Dec 2024
 (471 trading days).
 
 > **Read `POSTMORTEM.md` before quoting any result.** Runs 1–25 were
-> produced by a pipeline with four time-alignment bugs and are invalid.
-> The published "Sharpe 1.56" came from an out-of-sample target that was
-> identically zero. On the fixed pipeline the same Run 25 config gives
-> Sharpe 1.10 / Sortino 1.63 / Max DD 2.6% — but with OOS R² of −0.0011,
-> near-zero kernel weights and only 40 active days, that number is not
-> evidence of a directional edge either.
+> produced by a pipeline with four time-alignment bugs plus a lookahead
+> leak, and are invalid. The published "Sharpe 1.56" came from an
+> out-of-sample target that was identically zero.
+>
+> On the fixed pipeline the same Run 25 config gives Sharpe 1.41 /
+> Sortino 2.32 / Max DD 2.3%. **That is not evidence of edge.** Fixing
+> the lookahead leak — giving the model strictly less information — moved
+> the Sharpe from 1.10 to 1.41 while the out-of-sample prediction got
+> worse (R² −0.0011 → −0.0033). Stage-2 OOS correlation is −0.0059, the
+> OrderFlow kernel gets a weight of exactly 0, and the P&L comes from 44
+> active days out of 172.
 
 ## Setup
 
@@ -50,8 +55,8 @@ Everything is configured via environment variables (no CLI args).
 its results — start there. `pipeline.txt` documents the architecture and
 file layout.
 
-Best configuration (Run 25 — v2 hybrid; Sharpe 1.10 post-fix, see
-`POSTMORTEM.md`):
+Best configuration (Run 25 — v2 hybrid; Sharpe 1.41 post-fix, see
+`POSTMORTEM.md` before quoting it):
 
 ```bash
 ARCH_VERSION=v2 SIGNAL_MODE=kalman KALMAN_Q=aggressive TUNE_KERNELS=0 WARMUP_DAYS=60 VOL_SIZING=1 ENTRY_CHOPPY=1.50 EXIT_TRENDING=0.10 EXIT_CHOPPY=0.35 .venv/bin/python run_backtest.py
@@ -77,9 +82,15 @@ Tests:
 .venv/bin/python test_feature_alignment.py   # 15 tests, no market data
 ```
 
-`backtesting/test_pipeline.py` is currently broken — it imports a module
-`lob_kernel` that does not exist in this repo, and has been failing at
-import since before the alignment fix.
+`backtesting/test_pipeline.py` was removed: it imported a module
+`lob_kernel` that does not exist in this repo, so the "11 synthetic
+end-to-end tests" it was credited with had not run in a long time. The
+demo block at the bottom of `backtesting/visualize_backtest.py` imports
+the same missing module and is likewise dead.
+
+`figures/` and `reports/` are no longer tracked — every chart in them was
+generated from the pre-fix pipeline. Regenerate them with the commands
+above after a run.
 
 ## Repo map
 
@@ -114,4 +125,8 @@ target comes from dollar-bar closes and is checked for degeneracy on every
 fold. The old claim that the kernels act as a noise filter — "null test
 gives Sharpe -0.76 vs +1.55 with kernels" — was measured on the buggy
 pipeline and has not been re-run; the Stage-2 OOS R² on the fixed pipeline
-is −0.0011, so treat the kernels as unproven on returns.
+is −0.0033, so treat the kernels as unproven on returns.
+
+All feature normalisation is causal (`expanding_zscore`): row i is
+standardised against rows 0..i only. Do not reintroduce a full-sample
+`features.mean(axis=0)` / `.std(axis=0)` — that was bug 5.

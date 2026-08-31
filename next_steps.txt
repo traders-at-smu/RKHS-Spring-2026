@@ -6,10 +6,14 @@ the out-of-sample forward-return target was identically zero, so the
 ElasticNet collapsed to an intercept and the Kalman filter scored
 fold-boundary drift as signal.
 
+A fifth bug z-scored every feature over the whole sample, leaking the
+future distribution into every training bar.
+
 See POSTMORTEM.md. On the fixed pipeline the Run 25 config gives
-Sharpe 1.10, Sortino 1.63, Max DD 2.6%, Deflated SR 0.76 — with a
-Stage-2 OOS R2 of -0.0011 and near-zero kernel weights, so that is not
-evidence of edge either. Do not quote anything below without re-running.
+Sharpe 1.41, Sortino 2.32, Max DD 2.3%, Deflated SR 0.84 — but the
+Stage-2 OOS R2 is -0.0033 and the OrderFlow weight is exactly 0, so
+that is not evidence of edge either. Do not quote anything below
+without re-running.
 =================================================================
 
 RKHS Pipeline — Next Steps & Change List

@@ -8,7 +8,6 @@ Modules:
     signal_definition   OU signal generation and diagnostics
     metrics             DSR, Sortino, CKA, effective dimensionality, OOS NLL
     hyperparameter_cv   Nested CV, MKL optimizer, purged k-fold
-    test_pipeline       End-to-end synthetic pipeline tests
     visualize_backtest  15-figure publication-quality dashboard
 """
 

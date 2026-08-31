@@ -35,7 +35,8 @@ Pristine-RKHS/
 │   ├── hyperparameter_cv.py     NestedCV, MKLOptimizer, PurgedKFold
 │   ├── metrics.py               DSR, Sortino, CKA, effective dim, OOS NLL
 │   ├── visualize_backtest.py    15-figure publication dashboard (legacy)
-│   └── test_pipeline.py         11 synthetic end-to-end tests
+│   └── (test_pipeline.py removed — imported a module that no longer
+│        exists and had not run in a long time; see POSTMORTEM.md)
 │
 ├── analytics/                   Risk, portfolio, Monte Carlo (from Nyx)
 │   ├── __init__.py

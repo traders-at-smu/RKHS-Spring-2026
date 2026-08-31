@@ -288,3 +288,60 @@ def reindex_daily(df, target_dates, columns=None):
 
     out = pd.DataFrame(aligned, columns=cols, index=pd.Index(target_dates))
     return out.ffill().bfill()
+
+
+# ============================================================================
+# Causal normalisation
+# ============================================================================
+
+def expanding_mean(x: np.ndarray) -> np.ndarray:
+    """Mean of x[:i + 1] at every row i."""
+    x = np.asarray(x, dtype=float)
+    return np.cumsum(x, axis=0) / np.arange(1, x.shape[0] + 1, dtype=float).reshape(
+        (-1,) + (1,) * (x.ndim - 1)
+    )
+
+
+def expanding_zscore(
+    features: np.ndarray,
+    min_periods: int = 20,
+    eps: float = 1e-8,
+) -> np.ndarray:
+    """
+    Standardise each row against the rows before it, never the whole sample.
+
+    The feature builders used to finish with
+
+        mu, sigma = features.mean(axis=0), features.std(axis=0) + 1e-8
+        return (features - mu) / sigma
+
+    where mu and sigma are computed over every row, including rows that had
+    not happened yet at bar i. That leaks the sample's future distribution
+    into every training bar. Row i here sees only rows 0..i.
+
+    Rows before `min_periods` have too little history to standardise and are
+    returned as zero rather than as an enormous ratio of two tiny numbers.
+
+    Implemented with running sums so it stays O(n) — the fast kernels carry
+    150k-370k rows and a Python loop over them is not viable.
+    """
+    x = np.asarray(features, dtype=float)
+    one_d = x.ndim == 1
+    if one_d:
+        x = x[:, None]
+    n = x.shape[0]
+    if n == 0:
+        return x[:, 0] if one_d else x
+
+    # Offset by the first row so the running sums of squares stay well
+    # conditioned when the raw values are far from zero.
+    z = x - x[0]
+    counts = np.arange(1, n + 1, dtype=float)[:, None]
+    mean = np.cumsum(z, axis=0) / counts
+    var = np.maximum(np.cumsum(z * z, axis=0) / counts - mean * mean, 0.0)
+
+    out = (z - mean) / (np.sqrt(var) + eps)
+    out[:min(min_periods, n)] = 0.0
+    out[~np.isfinite(out)] = 0.0
+
+    return out[:, 0] if one_d else out

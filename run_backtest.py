@@ -42,6 +42,7 @@ from data_loader import DataLoader, LOBSnapshot
 from feature_alignment import (
     to_epoch_seconds, build_master_bar_schedule, align_fast_features,
     first_valid_bar, check_target_not_degenerate, reindex_daily,
+    expanding_zscore, expanding_mean,
 )
 
 # Kernels
@@ -222,7 +223,8 @@ def build_vpin_features(trades_df, dollar_threshold=1_000_000, vpin_window=50,
     delta_vpin = np.diff(vpin, prepend=vpin[0])
     bar_vol = np.array([b["volatility"] for b in bars])
     volumes = np.array([b["volume"] for b in bars])
-    rel_vol = volumes / (np.mean(volumes) + 1e-8)
+    # Relative to the volume seen so far, not to the whole sample's mean
+    rel_vol = volumes / (expanding_mean(volumes) + 1e-8)
 
     features = np.column_stack([vpin, delta_vpin, bar_vol, rel_vol])
     bar_ts = np.asarray(bar_close_ts, dtype=float)
@@ -230,9 +232,7 @@ def build_vpin_features(trades_df, dollar_threshold=1_000_000, vpin_window=50,
     features = features[vpin_window:]
     bar_ts = bar_ts[vpin_window:]
 
-    # Standardize
-    mu, sigma = features.mean(axis=0), features.std(axis=0) + 1e-8
-    features = (features - mu) / sigma
+    features = expanding_zscore(features)
     return (features, bar_ts) if return_timestamps else features
 
 
@@ -277,10 +277,9 @@ def build_kyle_features(trades_df, windows=(1, 5, 20), return_timestamps=False):
                 lam[t] = np.cov(dp, nf)[0, 1] / np.var(nf)
         lambdas[w] = lam
 
-    # Residual z-score
+    # Residual z-score, against history only
     residual = delta_p - lambdas[5] * net_flow
-    mu_r, sig_r = residual.mean(), residual.std() + 1e-8
-    residual_z = (residual - mu_r) / sig_r
+    residual_z = expanding_zscore(residual)
 
     features = np.column_stack([lambdas[w] for w in windows] + [residual_z])
     # Each bin closes on its last trade
@@ -291,8 +290,7 @@ def build_kyle_features(trades_df, windows=(1, 5, 20), return_timestamps=False):
     features = features[max(windows):]
     bin_ts = bin_ts[max(windows):]
 
-    mu, sigma = features.mean(axis=0), features.std(axis=0) + 1e-8
-    features = (features - mu) / sigma
+    features = expanding_zscore(features)
     return (features, bin_ts) if return_timestamps else features
 
 
@@ -361,8 +359,7 @@ def build_vrp_features(daily_ohlcv, vix_df=None, pcr_df=None, return_dates=False
 
     # Trim warmup
     features = features[30:]
-    mu, sigma = features.mean(axis=0), features.std(axis=0) + 1e-8
-    features = (features - mu) / sigma
+    features = expanding_zscore(features)
     return (features, daily_ohlcv.index[30:]) if return_dates else features
 
 
@@ -443,8 +440,7 @@ def build_macro_features(daily_ohlcv, spy_df=None, xle_df=None, return_dates=Fal
 
     features = np.column_stack([x_5, x_20, x_60, rho_spy, rho_xle, sigma_eps])
     features = features[60:]
-    mu, sigma = features.mean(axis=0), features.std(axis=0) + 1e-8
-    features = (features - mu) / sigma
+    features = expanding_zscore(features)
     return (features, daily_ohlcv.index[60:]) if return_dates else features
 
 
@@ -493,8 +489,7 @@ def build_hawkes_features(trades_df, window_seconds=300, return_timestamps=False
     # A window's features are only known at its right edge
     window_close_ts = epoch0 + bins[1:n_windows + 1]
 
-    mu, sigma = features.mean(axis=0), features.std(axis=0) + 1e-8
-    features = (features - mu) / sigma
+    features = expanding_zscore(features)
     return (features, window_close_ts) if return_timestamps else features
 
 
@@ -556,8 +551,7 @@ def build_event_proximity_features(daily_dates, event_calendar_df, tau=5.0):
     ])
 
     features = np.concatenate([features, cal_feats], axis=1)
-    mu, sigma = features.mean(axis=0), features.std(axis=0) + 1e-8
-    return (features - mu) / sigma
+    return expanding_zscore(features)
 
 
 # ============================================================================
@@ -600,8 +594,7 @@ def build_gamma_exposure_features(options_df):
 
         features[i] = [net_gex, pc_ratio]
 
-    mu, sigma = features.mean(axis=0), features.std(axis=0) + 1e-8
-    return (features - mu) / sigma, dates
+    return expanding_zscore(features), dates
 
 
 # ============================================================================
@@ -732,8 +725,7 @@ def build_vanna_charm_features(options_df, trades_df, dollar_threshold=1_000_000
         idx = min(idx, len(daily_dates) - 1)
         features[i] = [vanna_vals[idx], charm_vals[idx]]
 
-    mu, sigma = features.mean(axis=0), features.std(axis=0) + 1e-8
-    return (features - mu) / sigma
+    return expanding_zscore(features)
 
 
 # ============================================================================
