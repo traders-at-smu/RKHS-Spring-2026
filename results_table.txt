@@ -9,11 +9,12 @@ fold-boundary drift as signal.
 A fifth bug z-scored every feature over the whole sample, leaking the
 future distribution into every training bar.
 
-See POSTMORTEM.md. On the fixed pipeline the Run 25 config gives
-Sharpe 1.41, Sortino 2.32, Max DD 2.3%, Deflated SR 0.84 — but the
-Stage-2 OOS R2 is -0.0033 and the OrderFlow weight is exactly 0, so
-that is not evidence of edge either. Do not quote anything below
-without re-running.
+Worse, the metric itself does not discriminate. Across seeds the fixed
+pipeline scores Sharpe 0.28 +/- 1.18, while a control with a randomly
+shuffled target -- unpredictable by construction -- scores 1.15 +/- 1.08.
+Every Sharpe below, and every ranking derived from comparing them, is a
+draw from that distribution. See POSTMORTEM.md and run
+validate_pipeline.py.
 =================================================================
 
 RKHS Backtest Results — All 25 Runs

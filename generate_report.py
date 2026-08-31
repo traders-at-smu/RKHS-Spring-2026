@@ -446,17 +446,17 @@ def generate_text_report(results, boot_result, run_label, save_path):
 
 
 def main():
-    # Find results file
-    if len(sys.argv) > 1:
-        results_file = sys.argv[1]
-    else:
-        # Find most recent .npz
-        pattern = os.path.join(_ROOT, "backtest_results_*.npz")
-        files = sorted(glob.glob(pattern), key=os.path.getmtime, reverse=True)
-        if not files:
-            print("ERROR: No backtest results found. Run run_backtest.py first.")
-            sys.exit(1)
-        results_file = files[0]
+    # Find results file. Auto-discovery must not pick up a falsification
+    # control run or the abbreviated baseline stub — see results_io.
+    from results_io import select_results_file
+    try:
+        results_file = select_results_file(
+            sys.argv[1] if len(sys.argv) > 1 else None,
+            require=("daily_strat_returns", "daily_positions"),
+        )
+    except FileNotFoundError as e:
+        print(f"ERROR: {e}")
+        sys.exit(1)
 
     run_label = os.path.basename(results_file).replace("backtest_results_", "").replace(".npz", "")
     print(f"\n{'=' * 60}")

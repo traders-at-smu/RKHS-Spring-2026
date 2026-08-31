@@ -31,6 +31,16 @@ import numpy as np
 warnings.filterwarnings("ignore")
 
 _ROOT = os.path.dirname(os.path.abspath(__file__))
+
+# Every RNG in this file is seeded through _seed() so a whole run can be
+# repeated under a different draw with SEED=<n>. Random Fourier features,
+# PCA and the CKA subsample all depend on it, so a result that only holds
+# for SEED=0 is a result about one draw, not about the strategy.
+_SEED_OFFSET = int(os.environ.get("SEED", "0"))
+
+
+def _seed(base: int) -> int:
+    return base + _SEED_OFFSET
 sys.path.insert(0, _ROOT)
 sys.path.insert(0, os.path.join(_ROOT, "kernels"))
 sys.path.insert(0, os.path.join(_ROOT, "backtesting"))
@@ -79,7 +89,7 @@ class FeatureMatrixKernel:
     """
 
     def __init__(self, features: np.ndarray, nu=1.5, length_scale=1.0,
-                 n_rff=500, name="features", seed=42):
+                 n_rff=500, name="features", seed=_seed(42)):
         self.features = features
         self.name = name
         self.nu = nu
@@ -931,7 +941,7 @@ def main():
                 # Not enough history — use first ORDERFLOW_PCA_DIM raw features
                 orderflow_feats[i] = orderflow_raw[i, :ORDERFLOW_PCA_DIM]
             else:
-                pca = PCA(n_components=ORDERFLOW_PCA_DIM, random_state=42)
+                pca = PCA(n_components=ORDERFLOW_PCA_DIM, random_state=_seed(42))
                 pca.fit(orderflow_raw[:i])
                 orderflow_feats[i] = pca.transform(orderflow_raw[i:i+1])[0]
 
@@ -988,7 +998,7 @@ def main():
                 # Not enough data for PCA — use first SENT_PCA_DIM raw features
                 sent_reduced[i] = sent_raw[i, :SENT_PCA_DIM]
             else:
-                pca = PCA(n_components=SENT_PCA_DIM, random_state=42)
+                pca = PCA(n_components=SENT_PCA_DIM, random_state=_seed(42))
                 pca.fit(sent_raw[:i])  # fit on history only (no lookahead)
                 sent_reduced[i] = pca.transform(sent_raw[i:i+1])[0]
 
@@ -1083,6 +1093,60 @@ def main():
           f"{pd.to_datetime(master_ts[-1], unit='s', utc=True):%Y-%m-%d}), "
           f"dropped {_bar_keep:,} bars")
 
+    # ── 4c. Falsification controls (NULL_MODE) ───────────────────────────
+    # A backtest you cannot break is a backtest you cannot trust. These
+    # modes destroy the information the strategy claims to use while
+    # leaving every other moving part identical. If performance survives,
+    # the performance was never coming from the kernels.
+    #
+    #   noise          every prediction feature becomes iid N(0,1).
+    #                  This is the "no kernels" null.
+    #   shuffle_time   feature rows are permuted in time. Marginal
+    #                  distributions are preserved exactly; only the
+    #                  correspondence between features and dates is broken.
+    #   shuffle_target the forward-return target is permuted. Nothing can
+    #                  predict it, so any surviving P&L is manufactured by
+    #                  the harness itself.
+    #
+    # Position-sizing gates are NOT touched here — they are not prediction
+    # kernels. Set POSITION_GATE=0 and VOL_SIZING=0 to strip those too.
+    NULL_MODE = os.environ.get("NULL_MODE", "none").lower()
+    if NULL_MODE != "none":
+        _null_rng = np.random.default_rng(_seed(1234))
+        _pred_feats = {
+            "lob": lob_features_all, "vpin": vpin_feats, "kyle": kyle_feats,
+            "hawkes": hawkes_feats, "vc": vc_feats, "orderflow": orderflow_feats,
+            "vrp": vrp_feats, "macro": macro_feats, "sent": sent_feats,
+        }
+        print(f"\n[4c] NULL MODE: {NULL_MODE} — falsification run, "
+              f"results are expected to collapse")
+
+        if NULL_MODE == "noise":
+            for k, v in _pred_feats.items():
+                if v is not None:
+                    _pred_feats[k] = _null_rng.standard_normal(v.shape)
+        elif NULL_MODE == "shuffle_time":
+            for k, v in _pred_feats.items():
+                if v is not None:
+                    _pred_feats[k] = v[_null_rng.permutation(v.shape[0])]
+        elif NULL_MODE == "shuffle_target":
+            pass  # applied to y further down, once it exists
+        else:
+            raise ValueError(
+                f"NULL_MODE={NULL_MODE!r} — expected one of: none, noise, "
+                f"shuffle_time, shuffle_target"
+            )
+
+        lob_features_all = _pred_feats["lob"]
+        vpin_feats = _pred_feats["vpin"]
+        kyle_feats = _pred_feats["kyle"]
+        hawkes_feats = _pred_feats["hawkes"]
+        vc_feats = _pred_feats["vc"]
+        orderflow_feats = _pred_feats["orderflow"]
+        vrp_feats = _pred_feats["vrp"]
+        macro_feats = _pred_feats["macro"]
+        sent_feats = _pred_feats["sent"]
+
     # ── 5. Align resolutions + build combiner ────────────────────────────
     print(f"\n[5/8] Aligning resolutions and building kernel combiner... "
           f"(arch={ARCH_VERSION})")
@@ -1122,22 +1186,22 @@ def main():
         # Build kernel adapters — v2
         of_kernel = FeatureMatrixKernel(fast_trimmed["OrderFlow"], nu=1.5,
                                          length_scale=1.0, n_rff=512,
-                                         name="OrderFlow", seed=42)
+                                         name="OrderFlow", seed=_seed(42))
 
         vc_kernel = None
         if "VannaCharm" in fast_trimmed:
             vc_kernel = FeatureMatrixKernel(fast_trimmed["VannaCharm"], nu=1.5,
                                             length_scale=1.0, n_rff=256,
-                                            name="VannaCharm", seed=48)
+                                            name="VannaCharm", seed=_seed(48))
 
         vrp_kernel = FeatureMatrixKernel(vrp_slow, nu=1.5, length_scale=1.0,
-                                         n_rff=256, name="VRP", seed=45)
+                                         n_rff=256, name="VRP", seed=_seed(45))
         macro_kernel = FeatureMatrixKernel(macro_slow, nu=1.5, length_scale=1.0,
-                                           n_rff=256, name="Macro", seed=46)
+                                           n_rff=256, name="Macro", seed=_seed(46))
         sent_kernel = None
         if sent_slow is not None:
             sent_kernel = FeatureMatrixKernel(sent_slow, nu=1.5, length_scale=1.0,
-                                               n_rff=512, name="Sentiment", seed=50)
+                                               n_rff=512, name="Sentiment", seed=_seed(50))
 
         # No CKA checks in v2 — order flow is already consolidated
         print("  CKA: skipped (order-flow consolidated in v2)")
@@ -1245,34 +1309,34 @@ def main():
 
         # Build kernel adapters
         lob_kernel = FeatureMatrixKernel(lob_fast, nu=1.5, length_scale=1.0,
-                                         n_rff=500, name="LOB", seed=42)
+                                         n_rff=500, name="LOB", seed=_seed(42))
         vpin_kernel = FeatureMatrixKernel(vpin_fast, nu=1.5, length_scale=1.0,
-                                          n_rff=256, name="VPIN", seed=43)
+                                          n_rff=256, name="VPIN", seed=_seed(43))
         kyle_kernel = FeatureMatrixKernel(kyle_fast, nu=1.5, length_scale=1.0,
-                                          n_rff=256, name="Kyle", seed=44)
+                                          n_rff=256, name="Kyle", seed=_seed(44))
         hawkes_kernel = FeatureMatrixKernel(hawkes_fast, nu=1.5, length_scale=1.0,
-                                            n_rff=256, name="Hawkes", seed=47)
+                                            n_rff=256, name="Hawkes", seed=_seed(47))
 
         vc_kernel = None
         if "VannaCharm" in fast_trimmed:
             vc_kernel = FeatureMatrixKernel(fast_trimmed["VannaCharm"], nu=1.5,
                                             length_scale=1.0, n_rff=256,
-                                            name="VannaCharm", seed=48)
+                                            name="VannaCharm", seed=_seed(48))
 
         gex_kernel = None
         if "GammaExposure" in fast_trimmed:
             gex_kernel = FeatureMatrixKernel(fast_trimmed["GammaExposure"], nu=1.5,
                                               length_scale=1.0, n_rff=256,
-                                              name="GammaExposure", seed=49)
+                                              name="GammaExposure", seed=_seed(49))
 
         vrp_kernel = FeatureMatrixKernel(vrp_slow, nu=1.5, length_scale=1.0,
-                                         n_rff=256, name="VRP", seed=45)
+                                         n_rff=256, name="VRP", seed=_seed(45))
         macro_kernel = FeatureMatrixKernel(macro_slow, nu=1.5, length_scale=1.0,
-                                           n_rff=256, name="Macro", seed=46)
+                                           n_rff=256, name="Macro", seed=_seed(46))
         sent_kernel = None
         if sent_slow is not None:
             sent_kernel = FeatureMatrixKernel(sent_slow, nu=1.5, length_scale=1.0,
-                                               n_rff=512, name="Sentiment", seed=50)
+                                               n_rff=512, name="Sentiment", seed=_seed(50))
 
         # CKA redundancy checks
         print("\n  CKA redundancy checks...")
@@ -1412,7 +1476,7 @@ def main():
     print("\n  Fitting MomentumGate (Arjan)...")
     cl_daily = daily_close[:n_slow]
     mg = MomentumGate(short_window=20, long_window=60, vol_window=20,
-                      n_rff=256, random_state=42)
+                      n_rff=256, random_state=_seed(42))
     lookback = max(mg.long_window, mg.vol_window)
     if len(cl_daily) > lookback + 10:
         log_r = np.diff(np.log(cl_daily))
@@ -1436,7 +1500,7 @@ def main():
         event_gate=event_gate_fn,
         momentum_gate=mg,
         daily_prices=cl_daily if mg else None,
-        seed=42,
+        seed=_seed(42),
     )
 
     # ── 6. Walk-forward backtest ─────────────────────────────────────────
@@ -1534,6 +1598,10 @@ def main():
                                 side="left")
             j = np.clip(j, 0, n_fast - 1)
             y = log_p[j] - log_p
+
+    if NULL_MODE == "shuffle_target":
+        y = y[np.random.default_rng(_seed(5678)).permutation(len(y))]
+        print("  NULL MODE: target permuted — nothing can predict this")
 
     print("\n  Target sanity check:")
     check_target_not_degenerate(y, label=f"{TARGET_MODE} target (full sample)")
@@ -1647,7 +1715,7 @@ def main():
         event_gate=event_gate_fn,
         momentum_gate=mg,
         daily_prices=cl_daily if mg else None,
-        seed=42,
+        seed=_seed(42),
     )
 
     _tqdm_bar = None
@@ -1930,12 +1998,17 @@ def main():
                 cv=3,
                 max_iter=5000,
                 positive=POSITIVE_WEIGHTS,
-                random_state=42,
+                random_state=_seed(42),
             )
             enet.fit(X_s2_train, y_s2_train)
             stage2_pred[s2_test_start:s2_test_end] = enet.predict(X_s2_test)
 
         stage2_splits.append((s2_train_end, s2_test_start, s2_test_end))
+
+    # Stage-2 diagnostics — these say whether the kernels predict anything,
+    # independently of what the position P&L happens to do.
+    _stage2_corr, _stage2_r2 = float("nan"), float("nan")
+    _stage2_weights = {}
 
     # Trim to the portion with stage-2 predictions
     if not FIXED_WEIGHTS_STR:
@@ -1951,6 +2024,9 @@ def main():
             ss_res = np.sum((stage2_valid_true - stage2_valid_pred) ** 2)
             ss_tot = np.sum((stage2_valid_true - stage2_valid_true.mean()) ** 2)
             r2_s2 = 1 - ss_res / ss_tot if ss_tot > 0 else 0
+            _stage2_corr, _stage2_r2 = float(corr_s2), float(r2_s2)
+            _stage2_weights = dict(zip(kernel_names_list,
+                                       [float(c) for c in enet.coef_]))
 
             print(f"\n  Stage-2 ElasticNet results:")
             print(f"    OOS correlation: {corr_s2:+.4f}")
@@ -2265,6 +2341,10 @@ def main():
               else "  (no active positions)")
 
     # Apply v2 position-sizing gate (scale positions by microstructure quality)
+    if os.environ.get("POSITION_GATE", "1") != "1":
+        position_size_gate = None
+        print("  v2 position-sizing gate: DISABLED (POSITION_GATE=0)")
+
     if ARCH_VERSION == "v2" and position_size_gate is not None:
         gate_aligned = position_size_gate[:len(positions)]
         if len(gate_aligned) < len(positions):
@@ -2419,6 +2499,9 @@ def main():
     target_tag = f"_{TARGET_MODE}" if TARGET_MODE != "returns" else ""
     n_slow_k = len(slow_kernels_list)
     run_label = f"{n_fast_k}fast_{n_slow_k}slow_twostage{arch_tag}{target_tag}{horizon_tag}{signal_tag}{loss_tag}{adaptive_tag}{warmup_tag}"
+    null_tag = "" if NULL_MODE == "none" else f"_null-{NULL_MODE}"
+    seed_tag = "" if _SEED_OFFSET == 0 else f"_seed{_SEED_OFFSET}"
+    run_label = f"{run_label}{null_tag}{seed_tag}"
     results_file = os.path.join(_ROOT, f"backtest_results_{run_label}.npz")
     np.savez(
         results_file,
@@ -2443,6 +2526,24 @@ def main():
         beta=mkl_result['beta'],
         kernel_names=np.array([k.name for k in fast_kernels] + [k.name for k in slow_kernels_list]),
         arch_version=ARCH_VERSION,
+        # Headline metrics, so downstream tooling reads numbers instead of
+        # re-deriving them (or scraping stdout).
+        sharpe=float(sr),
+        sortino=float(sortino),
+        deflated_sr=float(dsr),
+        max_drawdown=float(max_dd),
+        total_pnl=float(cum_pnl[-1]) if len(cum_pnl) else 0.0,
+        n_trades=int(n_trades),
+        n_days_active=int(active_days.sum()),
+        n_days_total=int(n_daily),
+        stage2_oos_corr=_stage2_corr,
+        stage2_oos_r2=_stage2_r2,
+        stage2_weights=np.array(list(_stage2_weights.items()), dtype=object),
+        # Configuration, so a saved run is self-describing.
+        null_mode=NULL_MODE,
+        seed_offset=_SEED_OFFSET,
+        n_fast_bars=int(n_fast),
+        n_slow_days=int(n_slow),
     )
     print(f"\n  Results saved to {os.path.basename(results_file)}")
 

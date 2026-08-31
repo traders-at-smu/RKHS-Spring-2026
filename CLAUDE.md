@@ -9,13 +9,17 @@ multi-kernel RKHS strategy on CL (crude oil) futures, Jul 2023 – Dec 2024
 > leak, and are invalid. The published "Sharpe 1.56" came from an
 > out-of-sample target that was identically zero.
 >
-> On the fixed pipeline the same Run 25 config gives Sharpe 1.41 /
-> Sortino 2.32 / Max DD 2.3%. **That is not evidence of edge.** Fixing
-> the lookahead leak — giving the model strictly less information — moved
-> the Sharpe from 1.10 to 1.41 while the out-of-sample prediction got
-> worse (R² −0.0011 → −0.0033). Stage-2 OOS correlation is −0.0059, the
-> OrderFlow kernel gets a weight of exactly 0, and the P&L comes from 44
-> active days out of 172.
+> **The reported Sharpe carries no information about predictive skill.**
+> Across seeds the fixed pipeline scores 0.28 ± 1.18 — while a control
+> whose target has been randomly shuffled, so that nothing can predict it
+> by construction, scores 1.15 ± 1.08. The two are not separable. Any
+> single-seed Sharpe from this pipeline, 1.56 included, is a draw from
+> that distribution.
+>
+> Stage-2 out-of-sample correlation is ≈ −0.014 with real features and
+> ≈ −0.015 with pure noise. The OrderFlow kernel gets an ElasticNet weight
+> of exactly 0. Do not use Sharpe to choose between configurations here —
+> run `validate_pipeline.py` and read `POSTMORTEM.md`.
 
 ## Setup
 
@@ -55,8 +59,8 @@ Everything is configured via environment variables (no CLI args).
 its results — start there. `pipeline.txt` documents the architecture and
 file layout.
 
-Best configuration (Run 25 — v2 hybrid; Sharpe 1.41 post-fix, see
-`POSTMORTEM.md` before quoting it):
+Run 25 configuration (the historical "best"; see `POSTMORTEM.md` before
+quoting any number it produces):
 
 ```bash
 ARCH_VERSION=v2 SIGNAL_MODE=kalman KALMAN_Q=aggressive TUNE_KERNELS=0 WARMUP_DAYS=60 VOL_SIZING=1 ENTRY_CHOPPY=1.50 EXIT_TRENDING=0.10 EXIT_CHOPPY=0.35 .venv/bin/python run_backtest.py
@@ -79,8 +83,16 @@ python generate_report.py      # full text report → reports/
 Tests:
 
 ```bash
-.venv/bin/python test_feature_alignment.py   # 15 tests, no market data
+.venv/bin/python test_feature_alignment.py   # 21 tests, no market data
+.venv/bin/python test_results_io.py          #  8 tests, no market data
+.venv/bin/python validate_pipeline.py        # falsification suite, ~25 min
 ```
+
+`validate_pipeline.py` re-runs the pipeline with the information it claims
+to use destroyed (noise features, features shuffled in time, shuffled
+target) across several seeds, and fails if out-of-sample correlation
+survives a shuffled target. Run it after any change to feature
+construction, alignment, or the walk-forward engine.
 
 `backtesting/test_pipeline.py` was removed: it imported a module
 `lob_kernel` that does not exist in this repo, so the "11 synthetic
@@ -96,8 +108,14 @@ above after a run.
 
 - `run_backtest.py` — main entry point; full walk-forward pipeline end-to-end
 - `feature_alignment.py` — master dollar-bar schedule and the wall-clock
-  as-of joins that put every kernel on one time axis. Everything time-
-  related goes through here; never align features by row number.
+  as-of joins that put every kernel on one time axis, plus the causal
+  `expanding_zscore`. Everything time-related goes through here; never
+  align features by row number.
+- `validate_pipeline.py` — falsification suite (noise / shuffled-time /
+  shuffled-target controls across seeds)
+- `results_io.py` — results-file discovery that refuses to hand a
+  falsification control run to a reporting tool
+- `HANDOFF.md` — state of play and the multi-asset project brief
 - `data_loader.py` — data → kernel-input bridge
 - `kernels/` — 10 RKHS kernel layers. Active: LOB, VPIN, Kyle's Lambda,
   Hawkes (fast); VRP, MacroMotion (slow). Gates: momentum_gate,
@@ -124,8 +142,10 @@ a single daily date axis, before anything is combined. The forward-return
 target comes from dollar-bar closes and is checked for degeneracy on every
 fold. The old claim that the kernels act as a noise filter — "null test
 gives Sharpe -0.76 vs +1.55 with kernels" — was measured on the buggy
-pipeline and has not been re-run; the Stage-2 OOS R² on the fixed pipeline
-is −0.0033, so treat the kernels as unproven on returns.
+pipeline. It has now been re-run properly: with every prediction feature
+replaced by iid noise the pipeline scores 1.18 ± 1.25 against the real
+0.28 ± 1.18, so the kernels are not distinguishable from random features
+on CL.
 
 All feature normalisation is causal (`expanding_zscore`): row i is
 standardised against rows 0..i only. Do not reintroduce a full-sample

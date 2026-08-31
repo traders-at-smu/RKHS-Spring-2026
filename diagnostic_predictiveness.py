@@ -19,16 +19,17 @@ import numpy as np
 
 _ROOT = os.path.dirname(os.path.abspath(__file__))
 
-# Find the most recent v2 results file
-results_files = [f for f in os.listdir(_ROOT) if f.startswith("backtest_results_") and f.endswith(".npz")]
-v2_files = [f for f in results_files if "v2" in f]
-if v2_files:
-    results_file = sorted(v2_files)[-1]
-else:
-    results_file = sorted(results_files)[-1]
+# Auto-discovery must not pick up a falsification control run — sorting
+# filenames used to land on "..._null-shuffle_time_seed2" and analyse
+# deliberately destroyed features as if they were real.
+from results_io import select_results_file
 
-print(f"Loading: {results_file}")
-data = np.load(os.path.join(_ROOT, results_file), allow_pickle=True)
+results_file = select_results_file(
+    sys.argv[1] if len(sys.argv) > 1 else None,
+    require=("y_pred_oos", "y_true_oos", "s_scores", "positions"),
+)
+print(f"Loading: {os.path.basename(results_file)}")
+data = np.load(results_file, allow_pickle=True)
 
 y_pred = data["y_pred_oos"]
 y_true = data["y_true_oos"]
