@@ -116,6 +116,7 @@ above after a run.
 - `results_io.py` — results-file discovery that refuses to hand a
   falsification control run to a reporting tool
 - `HANDOFF.md` — state of play and the multi-asset project brief
+- `TODO.md` — prioritised work list, with the reasoning for each item
 - `data_loader.py` — data → kernel-input bridge
 - `kernels/` — 10 RKHS kernel layers. Active: LOB, VPIN, Kyle's Lambda,
   Hawkes (fast); VRP, MacroMotion (slow). Gates: momentum_gate,

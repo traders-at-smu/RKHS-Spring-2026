@@ -2,11 +2,12 @@
 
 For the Traders@SMU Quantitative Strategies Group taking this over.
 
-Read `POSTMORTEM.md` first. The short version: the published Sharpe 1.56
-was an artifact of five bugs, all now fixed. What you are inheriting is a
-pipeline whose *mechanics* are verified, running a strategy whose *edge*
-is not established. Those are different claims and it matters that you
-keep them apart.
+Read `POSTMORTEM.md` first, then `TODO.md` for the work list.
+
+The short version: the published Sharpe 1.56 was an artifact of five bugs,
+all now fixed. What you are inheriting is a pipeline whose *mechanics* are
+verified, running a strategy whose *edge* is not established. Those are
+different claims and it matters that you keep them apart.
 
 ## State of play
 
