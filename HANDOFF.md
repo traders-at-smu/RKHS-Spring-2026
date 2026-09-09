@@ -2,7 +2,8 @@
 
 For the Traders@SMU Quantitative Strategies Group taking this over.
 
-Read `POSTMORTEM.md` first, then `TODO.md` for the work list.
+Read `POSTMORTEM.md` first, then `TODO.md` for the reasoning behind the
+work list and `FALL_2026_TASKS.md` for the concrete Fall 2026 tasks.
 
 The short version: the published Sharpe 1.56 was an artifact of five bugs,
 all now fixed. What you are inheriting is a pipeline whose *mechanics* are

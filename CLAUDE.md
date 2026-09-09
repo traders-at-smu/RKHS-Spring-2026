@@ -117,6 +117,8 @@ above after a run.
   falsification control run to a reporting tool
 - `HANDOFF.md` — state of play and the multi-asset project brief
 - `TODO.md` — prioritised work list, with the reasoning for each item
+- `FALL_2026_TASKS.md` — the Fall 2026 execution list: concrete tasks,
+  acceptance criteria, sector owners, and the live-trading build
 - `data_loader.py` — data → kernel-input bridge
 - `kernels/` — 10 RKHS kernel layers. Active: LOB, VPIN, Kyle's Lambda,
   Hawkes (fast); VRP, MacroMotion (slow). Gates: momentum_gate,
